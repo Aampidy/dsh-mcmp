@@ -1,0 +1,19 @@
+{
+  "name": "mcmp-1",
+  "version": "2.0.0",
+  "description": "DeepSeek Harness 动态 Cordis 插件:数学建模论文自动化流水线(8 步骤、每轮 19 次迭代、质疑驱动、成果全落盘、实时进度面板)",
+  "private": true,
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "cordis-plugin",
+    "math-modeling",
+    "automation",
+    "workflow"
+  ],
+  "files": [
+    "host.js",
+    "client.js",
+    "README.md"
+  ]
+}
