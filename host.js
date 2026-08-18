@@ -309,7 +309,6 @@ return {
                 prompt: [{ type: 'text', text: buildPrompt(r, si, ii, s, it, args) }],
                 parent: agent,
                 signal: controller.signal,
-                maxDepth: 0,
               })
               appendRec(runId, session, 'tool-workflow/agent-start', { runId, seq, label, phase: s.phase, childId: String(child.id) })
               started = true
