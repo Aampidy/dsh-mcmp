@@ -3,22 +3,38 @@
  *
  * 本文件内容即 cordis_define 的 code.host 参数:一个纯 JavaScript 函数体,
  * 返回 Cordis Plugin 对象。运行时依赖(全部通过 ctx.get 可选获取):
- *   - fs            写入赛题与成果文件
  *   - commands      注册 /loopbegin、/loopabort、/loopstatus 命令
- *   - workflowEngine 启动工作流脚本(8 步骤 × 19 迭代 × N 轮,子智能体执行)
+ *   - workflowEngine 工作流引擎:先取 Host 上下文,缺失时三级回退到 Agent 上下文
+ *                    (agentPresets.serviceFor / agent.ctx.get)
  *   - agents        消息触发时按 session 定位 Agent
  *   - systemPrompt  注册模型提示(避免模型重复执行流水线)
- * 另监听 workflow/* 事件维护进度状态,并通过 harness.handle 向 Client 面板
- * 提供 get-state / abort / reset 三个 RPC。
+ *   - fs            仅用于进度面板的文件列表(非关键路径)
+ * 工作流事件(workflow/*)与 session/event 全部使用全局监听({ global: true }),
+ * 因为引擎可能挂在 Agent 作用域。监听后维护进度状态,并通过 harness.handle
+ * 向 Client 面板提供 get-state / abort / reset 三个 RPC。
  */
 return {
   name: 'mcmp',
   apply(ctx) {
     const fs = ctx.get('fs')
     const commands = ctx.get('commands')
-    const workflowEngine = ctx.get('workflowEngine')
+    const agentPresets = ctx.get('agentPresets')
     const agents = ctx.get('agents')
     const systemPrompt = ctx.get('systemPrompt')
+    console.log('mcmp: services available -> commands=' + !!commands + ' fs=' + !!fs + ' agents=' + !!agents + ' agentPresets=' + !!agentPresets + ' systemPrompt=' + !!systemPrompt + ' hostWorkflowEngine=' + !!ctx.get('workflowEngine'))
+
+    // 工作流引擎可能挂在 Agent 上下文(不在 Host 上下文),按三级回退获取
+    function getEngine(agent) {
+      const direct = ctx.get('workflowEngine')
+      if (direct) return direct
+      if (agentPresets && typeof agentPresets.serviceFor === 'function' && agent) {
+        try { const e = agentPresets.serviceFor(agent, 'workflowEngine'); if (e) return e } catch (err) { /* ignore */ }
+      }
+      if (agent && agent.ctx && typeof agent.ctx.get === 'function') {
+        try { const e = agent.ctx.get('workflowEngine'); if (e) return e } catch (err) { /* ignore */ }
+      }
+      return undefined
+    }
 
     // ---------- 步骤元数据(Host 面板进度计算用) ----------
     const STEPS = [
@@ -87,7 +103,15 @@ return {
       "  p.push('')",
       "  p.push('【流水线位置】第 ' + r + '/' + args.rounds + ' 轮 · 步骤 ' + (si + 1) + '/' + STEPS.length + ' ' + s.name + ' · 迭代 ' + (ii + 1) + '/' + s.iters.length + '「' + it.name + '」')",
       "  p.push('【工作区(绝对路径)】' + args.wsDir + ' —— 所有读写都使用绝对路径或相对该目录的路径,不要写到工作区之外。')",
-      "  p.push('【赛题原文】先阅读: ' + args.problemPath)",
+      "  if (args.problem.kind === 'file') {",
+      "    p.push('【赛题原文文件】' + args.problem.path + ' —— 请先用你的文件工具读取该文件全文,作为唯一的赛题依据。')",
+      "  } else {",
+      "    p.push('【赛题原文(已完整嵌入下方,请逐字精读)】')",
+      "    p.push(args.problem.text)",
+      "    if (si === 0 && ii === 0) {",
+      "      p.push('【先存档】请先把上面嵌入的赛题原文完整保存为 ' + args.problemPath + ' 文件,供后续所有步骤读取。')",
+      "    }",
+      "  }",
       "  p.push('【必读文件】')",
       "  p.push('- ' + s.file + ' (本步骤历次迭代的成果,本次要在此基础上改进)')",
       "  var prev = prevFiles(si)",
@@ -140,22 +164,9 @@ return {
     const META = {
       name: 'mathmodel-paper-pipeline',
       description: '全国大学生数学建模竞赛论文自动化流水线:赛题分析→模型求解→编程→图表→流程图→论文→合规检查→评审改进,外循环多轮,每步先质疑再迭代优化,成果全部落盘',
-      whenToUse: '用户粘贴数学建模竞赛赛题后,发送以 /loopbegin 开头的消息(可带 --round=N)即可启动',
+      whenToUse: '用户粘贴数学建模竞赛赛题后,发送以 /loopbegin 开头的消息(可带 --round=N 或 --from 文件)即可启动',
       phases: STEPS.map((s) => ({ title: s.phase, detail: s.name })),
     }
-
-    const README = [
-      '# 数学建模论文自动化流水线 · 输出目录说明',
-      '',
-      '- `00_赛题原文.md` —— 流水线启动时自动保存的赛题原文',
-      '- `01_赛题分析.md` ~ `08_评审改进.md` —— 八大步骤的完整成果,每个迭代都追加保存(含质疑清单),绝不覆盖旧内容',
-      '- `代码/` —— 全部验证与求解代码(按步骤分子目录,新版本用 _vN 后缀,旧版本全部保留)',
-      '- `图表/` —— 全部生成的图表(含归档)',
-      '- `论文/` —— LaTeX 源码(若环境支持)',
-      '',
-      '每轮 19 次迭代:赛题分析×3 → 模型求解×3 → 编程实现×3 → 图表生成×3 → 流程与架构图×3 → 论文撰写×2 → 编译与合规检查×1 → 评审改进循环×1。',
-      '外循环轮数由 `/loopbegin --round=N` 指定(默认 1 轮),每一轮的成果都会作为下一轮的输入被充分参考。',
-    ].join('\n')
 
     // ---------- 运行状态 ----------
     function freshState() {
@@ -266,8 +277,6 @@ return {
         if (state.status === 'running') {
           return { kind: 'error', text: '已有流水线正在运行(当前进度 ' + (state.total > 0 ? Math.floor((state.done * 100) / state.total) : 0) + '%)。可在浮动面板点「中止」或运行 /loopabort 后再启动新流水线。' }
         }
-        if (!workflowEngine) return { kind: 'error', text: '工作流引擎不可用,无法启动流水线。' }
-        if (!fs) return { kind: 'error', text: '文件服务不可用,无法保存赛题与成果。' }
         const session = agent && agent.session
         const cwd = session && session.header ? session.header.cwd : undefined
         if (typeof cwd !== 'string' || cwd.length === 0) {
@@ -279,38 +288,32 @@ return {
         if (mRound) rounds = parseInt(mRound[1], 10)
         if (!Number.isSafeInteger(rounds) || rounds < 1) rounds = 1
         if (rounds > 10) return { kind: 'error', text: '--round 最大为 10。每轮 19 次迭代、每次迭代启动一个专家子智能体,轮数过大会非常耗时。' }
-        const mFrom = /(?:^|\s)--from\s+([^"'\s]+)/i.exec(raw)
-        let problem = ''
+        // --from 容错:支持 --from 文件、--from=文件,以及文件名含空格/中文
+        const mFrom = /(?:^|\s)--from(?:=)?\s*([^\r\n]+)$/i.exec(raw)
+        let problem = null
         if (mFrom) {
-          try {
-            const t = await fs.resolve(mFrom[1], { cwd })
-            const info = await fs.stat(t)
-            if (!info) return { kind: 'error', text: '--from 指定的文件不存在: ' + mFrom[1] }
-            problem = await fs.readText(t)
-          } catch (err) {
-            return { kind: 'error', text: '读取 --from 文件失败: ' + String((err && err.message) || err) }
-          }
+          let p = mFrom[1].trim().replace(/^["']|["']$/g, '')
+          if (p.length === 0) return { kind: 'error', text: '--from 需要指定赛题文件路径。' }
+          const abs = /^[A-Za-z]:[\\/]/.test(p) || p.indexOf('/') === 0 || p.indexOf('\\') === 0
+            ? p
+            : cwd.replace(/[\\/]+$/, '') + '/' + p
+          problem = { kind: 'file', path: abs }
         } else {
-          problem = extractProblem(session)
-        }
-        if (problem.trim().length < 40) {
-          return { kind: 'error', text: '未能从对话中提取到赛题。请先把完整赛题粘贴到对话框并发送,再发送以 /loopbegin 开头的消息;或使用 /loopbegin --from 题目.txt 指定赛题文件。' }
+          const text = extractProblem(session)
+          if (text.trim().length < 40) {
+            return { kind: 'error', text: '未能从对话中提取到赛题。请先把完整赛题粘贴到对话框并发送,再发送以 /loopbegin 开头的消息;或使用 /loopbegin --from 题目.txt 指定赛题文件。' }
+          }
+          problem = { kind: 'text', text: text.length > 6000 ? text.slice(0, 6000) + '\n…(原文过长,已截断)' : text }
         }
         const wsDir = cwd.replace(/[\\/]+$/, '') + '/数学建模流水线'
-        const problemPath = wsDir + '/00_赛题原文.md'
-        try {
-          const t = await fs.resolve(problemPath)
-          await fs.writeText(t, '# 赛题原文\n\n' + problem)
-          const rd = await fs.resolve(wsDir + '/流水线说明.md')
-          await fs.writeText(rd, README)
-        } catch (err) {
-          return { kind: 'error', text: '写入工作区失败: ' + String((err && err.message) || err) }
-        }
-        const title = problem.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0)[0]
-        const run = workflowEngine.start({
+        const problemPath = problem.kind === 'file' ? problem.path : wsDir + '/00_赛题原文.md'
+        const engine = getEngine(agent)
+        if (!engine) return { kind: 'error', text: '工作流引擎不可用(当前部署未提供),无法启动流水线。' }
+        const title = problem.kind === 'text' ? problem.text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0)[0] : problem.path
+        const run = engine.start({
           script: SCRIPT,
           meta: META,
-          args: { rounds, wsDir, problemPath, title: title ? title.slice(0, 40) : '赛题' },
+          args: { rounds, wsDir, problemPath, problem, title: title ? title.slice(0, 40) : '赛题' },
           parent: agent,
         })
         const runId = String(run.id)
@@ -336,7 +339,7 @@ return {
         refreshFiles()
         return {
           kind: 'success',
-          text: '数学建模论文自动化流水线已启动:' + rounds + ' 轮 × 19 次迭代 = ' + (rounds * PER_ROUND) + ' 个子任务。\n输出目录: ' + wsDir + '\n每个子任务由专家子智能体执行,先对已有成果质疑、再迭代优化,并把完整成果追加保存到对应步骤文件(旧内容绝不删除)。\n进度请在右侧浮动面板实时查看(含百分比),聊天区也会出现流水线运行卡片。',
+          text: '数学建模论文自动化流水线已启动:' + rounds + ' 轮 × 19 次迭代 = ' + (rounds * PER_ROUND) + ' 个子任务。\n输出目录: ' + wsDir + '\n每个子任务由专家子智能体执行,先对已有成果质疑、再迭代优化,并把完整成果追加保存到对应步骤文件(旧内容绝不删除)。\n进度请在右下角浮动面板实时查看(含百分比),聊天区也会出现流水线运行卡片。',
         }
       } catch (err) {
         return { kind: 'error', text: '启动失败: ' + String((err && err.message) || err) }
@@ -348,7 +351,7 @@ return {
       commands.register({
         name: 'loopbegin',
         description: '启动数学建模论文自动化流水线(8 步骤、每步多迭代、多轮外循环,自动质疑与优化,成果全部落盘)',
-        input: { hint: '--round=N 外循环轮数(默认 1);可选 --from 题目.txt 指定赛题文件' },
+        input: { hint: '--round=N 外循环轮数(默认 1);可选 --from 题目文件 指定赛题文件' },
         handler: (invocation) => startPipeline(invocation.agent, invocation.rawInput),
       })
 
@@ -397,7 +400,7 @@ return {
           pushLog('消息触发启动异常: ' + String((err && err.message) || err))
         })
       } catch (err) { /* 触发器自身异常忽略,不影响消息流 */ }
-    })
+    }, { global: true })
 
     // ---------- 模型侧提示:收到 /loopbegin 消息时不要重复执行 ----------
     if (systemPrompt) {
@@ -409,6 +412,7 @@ return {
     }
 
     // ---------- 工作流事件监听 + 会话记录(驱动聊天区原生工作流卡片) ----------
+    // 引擎可能挂在 Agent 上下文,事件在对应作用域发出,因此全部使用全局监听
     ctx.on('workflow/agent-start', (info, a) => {
       const rec = recording.get(String(info.id))
       if (!rec || !rec.ok) return
@@ -421,7 +425,7 @@ return {
         state.agentLabel = a.label
         if (a.phase) state.phase = a.phase
       }
-    })
+    }, { global: true })
 
     ctx.on('workflow/agent-end', (info, a) => {
       const rec = recording.get(String(info.id))
@@ -434,7 +438,7 @@ return {
         state.done = Math.min(state.done + 1, state.total)
         refreshFiles()
       }
-    })
+    }, { global: true })
 
     ctx.on('workflow/end', (info, result) => {
       const rec = recording.get(String(info.id))
@@ -455,15 +459,15 @@ return {
         refreshFiles()
         Promise.resolve(run.result).then(() => run.dispose()).catch(() => run.dispose())
       }
-    })
+    }, { global: true })
 
     ctx.on('workflow/phase', (info, title) => {
       if (active && String(info.id) === active.runId) state.phase = title
-    })
+    }, { global: true })
 
     ctx.on('workflow/log', (info, message) => {
       if (active && String(info.id) === active.runId) pushLog(message)
-    })
+    }, { global: true })
 
     // ---------- 面板 RPC ----------
     harness.handle('get-state', () => snapshot())
