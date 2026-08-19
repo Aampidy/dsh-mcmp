@@ -46,6 +46,56 @@ DeepSeek Harness **动态 Cordis 插件**:面向全国大学生数学建模竞�
 | `题目正文… /loopbegin`(不在开头) | ❌ |
 | `/loopstatus`、`/loopabort` | 辅助命令,不触发 |
 
+## 安装方式
+
+### 方式一:持久化安装(推荐,重启不丢)
+
+以正式插件包安装到用户配置层,DSH 每次启动自动加载。假设 Windows 环境、DSH 主目录为 `%USERPROFILE%\.dsh`(即 `$DSH_HOME`)。
+
+**1. 放置插件包**
+
+将 `persistent/` 下的文件放到配置层目录:
+
+```
+$DSH_HOME/profiles/web/plugins/dsh-mcmp/
+├── package.json        # dsh.client 声明 + 包入口
+└── lib/
+    ├── index.js        # Host 半:命令、编排、断点续跑、/mcmp-api 路由
+    └── client.js       # Client 半:浮动进度面板(__ModuleLoader__ bundle)
+```
+
+**2. 建立包解析链接**(Windows 无需管理员权限)
+
+```cmd
+mklink /J "%USERPROFILE%\.dsh\profiles\node_modules\dsh-mcmp" "%USERPROFILE%\.dsh\profiles\web\plugins\dsh-mcmp"
+```
+
+**3. 在配置层注册插件行**
+
+编辑 `$DSH_HOME/profiles/web/cordis.patch.yml`,追加(注意必须用 `insert:` 列表语法):
+
+```yaml
+- insert:
+    - id: mcmp
+      name: dsh-mcmp
+```
+
+**4. 重启并验证**
+
+- 重启 `dsh web`,刷新网页(插件随启动加载,面板 bundle 注入启动清单);
+- 验证接口:浏览器访问 `http://127.0.0.1:3080/mcmp-api/state`,返回 JSON 即安装成功;
+- 之后任何重启都无需再安装,`/loopbegin` 永久可用。
+
+**卸载**:删除 `cordis.patch.yml` 中的插件行(或恢复备份 `cordis.patch.yml.bak`),移除 junction 与 `plugins/dsh-mcmp/` 目录。
+
+### 方式二:动态插件安装(临时,仅当前进程)
+
+适合试用与开发调试;DSH 重启后自动消失,需重新安装:
+
+1. 把 `host.js` 内容作为 `code.host`、`client.js` 内容作为 `code.client`,通过 `cordis_define` 定义插件;
+2. `cordis_run` 激活(客户端包需在界面批准);
+3. 发送以 `/loopbegin` 开头的消息即可使用。
+
 ## 输出目录(工作区 `数学建模流水线/`)
 
 ```
@@ -62,28 +112,28 @@ DeepSeek Harness **动态 Cordis 插件**:面向全国大学生数学建模竞�
 
 ```
 用户消息(/loopbegin 开头)
-   │  session/event 监听(或 commands 斜杠命令)
+   │  session/event 全局监听(或 commands 斜杠命令)
    ▼
-Host 插件(mcmp)
-   ├─ 提取赛题 → 写入 00_赛题原文.md
-   ├─ workflowEngine.start(编排脚本 + meta + args)
-   │     └─ 每轮 19 次迭代,每次 agent(prompt) 启动一个专家子智能体
-   │          子智能体:读必读文件 → 先质疑 → 完成任务 → 追加落盘 → 返回总结
-   ├─ 监听 workflow/phase、log、agent-start/end、end → 维护进度状态
+Host 插件(dsh-mcmp,HOST 组合)
+   ├─ 提取赛题(对话文本或 --from 文件)
+   ├─ 断点续跑:扫描会话日志中 tool-workflow/* 记录,跳过已完成迭代
+   ├─ 编排器:按 8 步骤 × 19 迭代 × N 轮逐个启动专家子智能体(subagents.spawn)
+   │       子智能体:读必读文件 → 质疑先行 → 完成任务 → 追加落盘 → 返回总结
    ├─ 向会话追加 tool-workflow/* 事件 → 聊天区原生工作流卡片
-   └─ harness.handle: get-state / abort / reset
+   └─ 面板 API:webServer 路由 /mcmp-api/{state,abort,reset}
    ▲
-Client 插件(mcmp-ui)
-   ├─ shell.overlay 浮动面板,每 1.2s 轮询 get-state
-   └─ 进度条/步骤打点/日志/文件/中止按钮
+Client 插件(dsh-mcmp,标准 __ModuleLoader__ bundle)
+   ├─ shell.overlay 浮动面板,每 1.2s fetch('/mcmp-api/state') 轮询
+   └─ 进度条/步骤打点/日志/文件/中止按钮(拖拽仅绑定标题文字)
 ```
 
 ## 文件说明
 
 | 文件 | 内容 |
-|---|---|
-| `host.js` | Host 半源码,即 `cordis_define` 的 `code.host` 参数(纯 JS 函数体) |
-| `client.js` | Client 半源码,即 `cordis_define` 的 `code.client` 参数 |
+| --- | --- |
+| `host.js` | Host 半源码(动态插件格式),即 `cordis_define` 的 `code.host` 参数 |
+| `client.js` | Client 半源码(动态插件格式),即 `cordis_define` 的 `code.client` 参数 |
+| `persistent/` | **固化版插件包**(推荐安装方式):`package.json` + `lib/index.js`(Host)+ `lib/client.js`(Client bundle),复制到配置层后按「安装方式」章节注册即可 |
 
 ## 版本历史
 
