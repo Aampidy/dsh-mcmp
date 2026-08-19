@@ -1,5 +1,7 @@
 # mcmp-1 · 数学建模论文自动化流水线
 
+[![npm](https://img.shields.io/badge/npm-dsh--mcmp-blue)](https://www.npmjs.com/package/dsh-mcmp)
+
 DeepSeek Harness **动态 Cordis 插件**:面向全国大学生数学建模竞赛论文撰写的全自动流水线。
 粘贴赛题 → 发送一条以 `/loopbegin` 开头的消息 → 插件按 8 大步骤、每步多次迭代自动完成论文撰写,
 全程由专家子智能体「先质疑、再迭代」驱动,成果全部落盘保存,右下角浮动面板实时显示进度百分比。
@@ -50,7 +52,7 @@ DeepSeek Harness **动态 Cordis 插件**:面向全国大学生数学建模竞�
 
 > 本仓库根目录**就是插件包本体**(`package.json` + `lib/`),与部署目录同构。
 
-### 方式一:`dsh plugin add` 安装(推荐,需插件已发布到 npm)
+### 方式一:`dsh plugin add` 安装(推荐,已发布到 npm)
 
 与官方插件相同的安装体验,一条命令安装、注册:
 
