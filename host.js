@@ -6,13 +6,14 @@
  *   - commands   注册 /loopbegin、/loopabort、/loopstatus 命令
  *   - subagents  Host 侧子智能体服务:插件直接编排 8 步骤 × 19 迭代 × N 轮,
  *                子智能体归 Host 所有,与聊天会话生命周期解耦(关闭聊天窗口不中断)
- *   - agents     消息触发时按 session 定位 Agent
+ *   - agents     消息触发时按 session 定位 Agent;每个子任务启动前重新解析父 Agent
  *   - systemPrompt 注册模型提示(避免模型重复执行流水线)
  *   - fs         仅用于进度面板的文件列表(非关键路径)
- * 启动逻辑全部同步执行(命令通道永不阻塞);每个子任务由 spawn provider 启动的
- * 专家子智能体完成,先质疑上一版成果再迭代优化,成果全部追加落盘。插件同时向
- * 会话追加 tool-workflow/* 事件,驱动聊天区原生工作流卡片;并通过 harness.handle
- * 向 Client 面板提供 get-state / abort / reset 三个 RPC。
+ * 启动逻辑全部同步执行(命令通道永不阻塞)。断点续跑:启动时扫描本会话落盘的
+ * tool-workflow/* 事件,跳过已完成的迭代(--fresh 可强制从头重跑)。每个子任务由
+ * spawn provider 启动的专家子智能体完成,先质疑上一版成果再迭代优化,成果全部
+ * 追加落盘。插件同时向会话追加 tool-workflow/* 事件驱动聊天区原生工作流卡片,
+ * 并通过 harness.handle 向 Client 面板提供 get-state / abort / reset 三个 RPC。
  */
 return {
   name: 'mcmp',
@@ -93,7 +94,6 @@ return {
       return 'run-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1679616).toString(36)
     }
 
-    // AbortController 退化实现(鸭子类型 AbortSignal),保证无原生实现时也可用
     function makeController() {
       try {
         if (typeof AbortController === 'function') return new AbortController()
@@ -123,6 +123,48 @@ return {
         if (names && names.length > 0) return names.indexOf('spawn') >= 0 ? 'spawn' : names[0]
       } catch (err) { /* ignore */ }
       return undefined
+    }
+
+    // ---------- 断点续跑:从会话日志(落盘)恢复已完成迭代数 ----------
+    function completedIterations(session) {
+      if (!session || !Array.isArray(session.events)) return 0
+      const runs = []
+      let current = null
+      for (const ev of session.events) {
+        try {
+          if (ev.type === 'tool-workflow/run-start') {
+            const d = ev.data || {}
+            if (d.name === '数学建模论文流水线') {
+              current = { started: [], ended: [] }
+              runs.push(current)
+            } else {
+              current = null
+            }
+          } else if (ev.type === 'tool-workflow/agent-start' && current) {
+            const d = ev.data || {}
+            if (Number.isSafeInteger(d.seq) && d.seq >= 1) current.started[d.seq - 1] = true
+          } else if (ev.type === 'tool-workflow/agent-end' && current) {
+            const d = ev.data || {}
+            if (Number.isSafeInteger(d.seq) && d.seq >= 1) current.ended[d.seq - 1] = d.outcome === 'completed'
+          }
+        } catch (err) { /* 单条事件解析失败忽略 */ }
+      }
+      const prefix = (run) => {
+        let n = 0
+        for (let i = 0; i < run.started.length; i++) {
+          if (run.started[i] === true && run.ended[i] === true) n = i + 1
+          else break
+        }
+        return n
+      }
+      const last = runs[runs.length - 1]
+      let n = last ? prefix(last) : 0
+      if (n === 0) {
+        let m = 0
+        for (const run of runs) m = Math.max(m, prefix(run))
+        n = m
+      }
+      return n
     }
 
     function snapshot() {
@@ -274,9 +316,8 @@ return {
       refreshFiles()
     }
 
-    // ---------- Host 侧编排器:逐个启动子智能体(不依赖聊天 Agent 存活) ----------
+    // ---------- Host 侧编排器:从断点继续(不依赖聊天 Agent 存活) ----------
     async function runPipeline(runId, session, agent, args, controller) {
-      let seq = 0
       let failStreak = 0
       let cancelled = false
       const provider = pickProvider()
@@ -285,62 +326,60 @@ return {
         if (active && active.runId === runId) active = null
         return
       }
-      for (let r = 1; r <= args.rounds; r++) {
+      const total = args.rounds * PER_ROUND
+      for (let g = args.startIndex; g < total; g++) {
         if (controller.signal.aborted) { cancelled = true; break }
-        pushLog('【第 ' + r + '/' + args.rounds + ' 轮开始】')
-        for (let si = 0; si < STEPS.length; si++) {
-          if (controller.signal.aborted) { cancelled = true; break }
-          const s = STEPS[si]
-          state.phase = s.phase
-          for (let ii = 0; ii < s.iters.length; ii++) {
-            if (controller.signal.aborted) { cancelled = true; break }
-            const it = s.iters[ii]
-            seq += 1
-            const label = 'R' + r + '·S' + (si + 1) + ' ' + s.name + ' ' + (ii + 1) + '/' + s.iters.length + ' ' + it.name
-            state.agentLabel = label
-            pushLog('开始: ' + label)
-            let child = null
-            let started = false
-            let outcome = 'failed'
-            let note = ''
-            try {
-              child = await subagents.start(provider, {
-                label,
-                prompt: [{ type: 'text', text: buildPrompt(r, si, ii, s, it, args) }],
-                parent: agent,
-                signal: controller.signal,
-              })
-              appendRec(runId, session, 'tool-workflow/agent-start', { runId, seq, label, phase: s.phase, childId: String(child.id) })
-              started = true
-              const res = await child.result
-              const text = (Array.isArray(res.output) ? res.output.filter((b) => b && b.type === 'text').map((b) => b.text).join('') : '')
-              outcome = res.stopReason === 'completed' ? 'completed' : res.stopReason === 'cancelled' ? 'cancelled' : 'failed'
-              note = (text || '').trim().slice(0, 300)
-            } catch (err) {
-              outcome = controller.signal.aborted ? 'cancelled' : 'failed'
-              note = '执行异常: ' + String((err && err.message) || err).slice(0, 200)
-            } finally {
-              if (child) { try { await child.dispose() } catch (err) { /* ignore */ } }
-            }
-            if (started) appendRec(runId, session, 'tool-workflow/agent-end', { runId, seq, outcome })
-            state.done = Math.min(state.done + 1, state.total)
-            refreshFiles()
-            if (outcome === 'completed') {
-              failStreak = 0
-              pushLog('完成: ' + label)
-            } else {
-              failStreak += 1
-              pushLog(outcome === 'cancelled' ? '中止: ' : '失败: ' + label + (note ? '(' + note.slice(0, 80) + ')' : ''))
-            }
-            if (controller.signal.aborted) { cancelled = true; break }
-            if (failStreak >= 3) {
-              finishRun(runId, 'error', '连续 3 个子任务失败,流水线提前终止(已有成果全部保留)')
-              if (active && active.runId === runId) active = null
-              return
-            }
-          }
+        const r = Math.floor(g / PER_ROUND) + 1
+        const f = FLAT[g % PER_ROUND]
+        const s = STEPS[f.s]
+        const it = s.iters[f.i]
+        if (g % PER_ROUND === 0) pushLog('【第 ' + r + '/' + args.rounds + ' 轮开始】')
+        const label = 'R' + r + '·S' + (f.s + 1) + ' ' + s.name + ' ' + (f.i + 1) + '/' + s.iters.length + ' ' + it.name
+        state.phase = s.phase
+        state.agentLabel = label
+        pushLog('开始: ' + label)
+        let child = null
+        let started = false
+        let outcome = 'failed'
+        let note = ''
+        try {
+          // 每次启动子任务前重新解析父 Agent(关闭聊天后 Agent 可能被重建)
+          const parent = (agents && agents.get(session.id)) || agent
+          child = await subagents.start(provider, {
+            label,
+            prompt: [{ type: 'text', text: buildPrompt(r, f.s, f.i, s, it, args) }],
+            parent,
+            signal: controller.signal,
+          })
+          appendRec(runId, session, 'tool-workflow/agent-start', { runId, seq: g + 1, label, phase: s.phase, childId: String(child.id) })
+          started = true
+          const res = await child.result
+          const text = (Array.isArray(res.output) ? res.output.filter((b) => b && b.type === 'text').map((b) => b.text).join('') : '')
+          outcome = res.stopReason === 'completed' ? 'completed' : res.stopReason === 'cancelled' ? 'cancelled' : 'failed'
+          note = (text || '').trim().slice(0, 300)
+        } catch (err) {
+          outcome = controller.signal.aborted ? 'cancelled' : 'failed'
+          note = '执行异常: ' + String((err && err.message) || err).slice(0, 200)
+        } finally {
+          if (child) { try { await child.dispose() } catch (err) { /* ignore */ } }
         }
-        if (!cancelled) pushLog('【第 ' + r + '/' + args.rounds + ' 轮完成】')
+        if (started) appendRec(runId, session, 'tool-workflow/agent-end', { runId, seq: g + 1, outcome })
+        state.done = Math.min(g + 1, state.total)
+        refreshFiles()
+        if (outcome === 'completed') {
+          failStreak = 0
+          pushLog('完成: ' + label)
+        } else {
+          failStreak += 1
+          pushLog(outcome === 'cancelled' ? '中止: ' : '失败: ' + label + (note ? '(' + note.slice(0, 80) + ')' : ''))
+        }
+        if ((g + 1) % PER_ROUND === 0 && !controller.signal.aborted) pushLog('【第 ' + r + '/' + args.rounds + ' 轮完成】')
+        if (controller.signal.aborted) { cancelled = true; break }
+        if (failStreak >= 3) {
+          finishRun(runId, 'error', '连续 3 个子任务失败,流水线提前终止(已有成果全部保留,可重新 /loopbegin 续跑)')
+          if (active && active.runId === runId) active = null
+          return
+        }
       }
       finishRun(runId, cancelled ? 'cancelled' : 'completed', cancelled ? '已被用户中止' : undefined)
       if (active && active.runId === runId) active = null
@@ -364,6 +403,7 @@ return {
         if (mRound) rounds = parseInt(mRound[1], 10)
         if (!Number.isSafeInteger(rounds) || rounds < 1) rounds = 1
         if (rounds > 10) return { kind: 'error', text: '--round 最大为 10。每轮 19 次迭代、每次迭代启动一个专家子智能体,轮数过大会非常耗时。' }
+        const fresh = /(?:^|\s)--fresh\b/i.test(raw)
         const mFrom = /(?:^|\s)--from(?:=)?\s*([^\r\n]+)$/i.exec(raw)
         let problem = null
         if (mFrom) {
@@ -384,6 +424,12 @@ return {
         const problemPath = problem.kind === 'file' ? problem.path : wsDir + '/00_赛题原文.md'
         const title = problem.kind === 'text' ? problem.text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0)[0] : problem.path
         const args = { rounds, wsDir, problemPath, problem, title: title ? title.slice(0, 40) : '赛题' }
+        // 断点续跑:扫描本会话落盘的工作流记录,跳过已完成的迭代
+        const resumeCount = fresh ? 0 : completedIterations(session)
+        args.startIndex = resumeCount
+        if (resumeCount >= rounds * PER_ROUND) {
+          return { kind: 'error', text: '检测到本会话已完成 ' + resumeCount + ' 次迭代(≥ 本次请求的 ' + (rounds * PER_ROUND) + ' 次),无需重复。\n- 如需继续优化,请增大轮数,例如 /loopbegin --round=' + Math.min(rounds + 1, 10) + '\n- 如需从头重跑,请使用 /loopbegin --fresh' }
+        }
         const runId = mintRunId()
         const rec = { session, ok: true }
         recording.set(runId, rec)
@@ -397,14 +443,15 @@ return {
         state.runId = runId
         state.rounds = rounds
         state.total = rounds * PER_ROUND
-        state.round = 1
+        state.done = resumeCount
+        state.round = Math.min(Math.floor(resumeCount / PER_ROUND) + 1, rounds)
         state.startedAt = Date.now()
         state.wsDir = wsDir
         state.problemPath = problemPath
         state.title = args.title
         const controller = makeController()
         active = { runId, session, controller }
-        pushLog('流水线已启动: ' + rounds + ' 轮 × 19 次迭代,输出目录 ' + wsDir + '(即使关闭本聊天窗口,流水线也会继续在后台执行)')
+        pushLog('流水线已启动: ' + rounds + ' 轮 × 19 次迭代,输出目录 ' + wsDir + (resumeCount > 0 ? '(断点续跑:跳过已完成的 ' + resumeCount + ' 次迭代)' : '') + '(关闭本聊天窗口不影响后台执行)')
         refreshFiles()
         void runPipeline(runId, session, agent, args, controller).catch((err) => {
           pushLog('流水线异常: ' + String((err && err.message) || err))
@@ -413,7 +460,9 @@ return {
         })
         return {
           kind: 'success',
-          text: '数学建模论文自动化流水线已启动:' + rounds + ' 轮 × 19 次迭代 = ' + (rounds * PER_ROUND) + ' 个子任务。\n输出目录: ' + wsDir + '\n每个子任务由专家子智能体执行,先对已有成果质疑、再迭代优化,并把完整成果追加保存到对应步骤文件(旧内容绝不删除)。\n进度请在右下角浮动面板实时查看(含百分比),聊天区也会出现流水线运行卡片。\n提示:关闭本聊天窗口不会中断流水线,重新打开工作区即可在浮动面板看到最新进度。',
+          text: '数学建模论文自动化流水线已启动:' + rounds + ' 轮 × 19 次迭代 = ' + (rounds * PER_ROUND) + ' 个子任务。\n输出目录: ' + wsDir
+            + (resumeCount > 0 ? '\n断点续跑:已跳过此前完成的 ' + resumeCount + ' 次迭代,从第 ' + (resumeCount + 1) + ' 次继续。' : '\n全新运行。')
+            + '\n每个子任务由专家子智能体执行,先对已有成果质疑、再迭代优化,并把完整成果追加保存到对应步骤文件(旧内容绝不删除)。\n进度请在右下角浮动面板实时查看(含百分比),聊天区也会出现流水线运行卡片。\n提示:中断或关闭聊天窗口都不会丢进度,再次发送 /loopbegin 即从断点续跑;如要重头开始请加 --fresh。',
         }
       } catch (err) {
         return { kind: 'error', text: '启动失败: ' + String((err && err.message) || err) }
@@ -425,7 +474,7 @@ return {
       commands.register({
         name: 'loopbegin',
         description: '启动数学建模论文自动化流水线(8 步骤、每步多迭代、多轮外循环,自动质疑与优化,成果全部落盘)',
-        input: { hint: '--round=N 外循环轮数(默认 1);可选 --from 题目文件 指定赛题文件' },
+        input: { hint: '--round=N 外循环轮数(默认 1);可选 --from 题目文件 指定赛题文件;--fresh 从头重跑' },
         handler: (invocation) => startPipeline(invocation.agent, invocation.rawInput),
       })
 
@@ -435,7 +484,7 @@ return {
         handler: () => {
           if (!active) return { kind: 'error', text: '当前没有运行中的流水线。' }
           try { active.controller.abort(new Error('用户通过 /loopabort 中止')) } catch (err) { /* ignore */ }
-          return { kind: 'success', text: '已发送中止请求,流水线将在当前子任务结束后停止(已产出的成果全部保留)。' }
+          return { kind: 'success', text: '已发送中止请求,流水线将在当前子任务结束后停止(已产出的成果全部保留,重新 /loopbegin 可从断点续跑)。' }
         },
       })
 
@@ -478,7 +527,7 @@ return {
       systemPrompt.section({
         name: 'mcmp-trigger',
         order: 130,
-        text: '数学建模流水线说明:当用户消息以 /loopbegin 开头(可带 --round=N 或 --from 文件参数)时,插件已自动在后台启动「数学建模论文自动化流水线」(8 步骤、每轮 19 次迭代,由工作流子智能体执行)。此时你只需用一两句话确认已启动,并提示用户查看右下角进度面板与聊天区的工作流运行卡片;绝对不要自己去编写或执行该流水线的任何步骤,不要重复启动。若用户消息包含赛题但未以 /loopbegin 开头,说明尚未启动流水线,不要擅自运行。辅助命令 /loopstatus、/loopabort 由系统处理,你无需执行。',
+        text: '数学建模流水线说明:当用户消息以 /loopbegin 开头(可带 --round=N、--from 文件或 --fresh 参数)时,插件已自动在后台启动「数学建模论文自动化流水线」(8 步骤、每轮 19 次迭代,由工作流子智能体执行)。此时你只需用一两句话确认已启动,并提示用户查看右下角进度面板与聊天区的工作流运行卡片;绝对不要自己去编写或执行该流水线的任何步骤,不要重复启动。若用户消息包含赛题但未以 /loopbegin 开头,说明尚未启动流水线,不要擅自运行。辅助命令 /loopstatus、/loopabort 由系统处理,你无需执行。',
       })
     }
 

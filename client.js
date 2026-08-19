@@ -7,7 +7,9 @@
  *   - 通过 host.call('get-state') 每 1.2 秒轮询 Host 进度状态
  *   - 显示总体百分比进度条、当前轮/步骤/迭代、8 步骤打点、日志、产出文件
  *   - 支持中止(abort)、清空状态(reset)、最小化、关闭、拖拽定位
- * 仅使用 React.createElement(无 JSX),样式全部基于 DSH 主题 CSS 变量。
+ * 注意:拖拽只绑定在标题文字上(指针捕获会吞掉同栏按钮的点击),按钮
+ * 点击不受拖拽影响。仅使用 React.createElement(无 JSX),样式基于 DSH
+ * 主题 CSS 变量并提供高对比度回退色。
  */
 return {
   name: 'mcmp-ui',
@@ -17,37 +19,37 @@ return {
     if (slots === undefined) return
     styles.insert([
       '.mcmp-panel { position: fixed; right: 16px; bottom: 16px; z-index: 9990; width: 344px; max-height: 78vh; display: flex; flex-direction: column; pointer-events: auto; background: var(--dsw-alias-bg-overlay); color: var(--dsw-alias-label-primary); border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; box-shadow: 0 16px 48px rgba(0,0,0,0.4); font-size: 12px; line-height: 1.55; overflow: hidden; font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }',
-      '.mcmp-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: var(--dsw-alias-bg-layer-1); border-bottom: 1px solid var(--dsw-alias-border-l1); cursor: grab; user-select: none; }',
-      '.mcmp-head:active { cursor: grabbing; }',
-      '.mcmp-title { font-weight: 600; font-size: 13px; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
-      '.mcmp-chip { padding: 1px 8px; border-radius: 999px; font-size: 11px; color: #fff; flex-shrink: 0; }',
-      '.mcmp-chip-run { background: var(--dsw-alias-brand-primary); animation: mcmp-pulse 1.6s ease-in-out infinite; }',
-      '.mcmp-chip-ok { background: var(--dsw-alias-state-success-primary); }',
-      '.mcmp-chip-err { background: var(--dsw-alias-state-error-primary); }',
-      '.mcmp-chip-warn { background: var(--dsw-alias-state-warn-primary); }',
+      '.mcmp-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: var(--dsw-alias-bg-layer-1); border-bottom: 1px solid var(--dsw-alias-border-l1); user-select: none; }',
+      '.mcmp-title { font-weight: 600; font-size: 13px; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: grab; padding: 2px 0; }',
+      '.mcmp-title:active { cursor: grabbing; }',
+      '.mcmp-chip { padding: 2px 9px; border-radius: 999px; font-size: 11px; color: #ffffff; flex-shrink: 0; text-shadow: 0 1px 1px rgba(0,0,0,0.3); font-weight: 600; }',
+      '.mcmp-chip-run { background: var(--dsw-alias-brand-primary, #2563eb); animation: mcmp-pulse 1.6s ease-in-out infinite; }',
+      '.mcmp-chip-ok { background: var(--dsw-alias-state-success-primary, #16a34a); }',
+      '.mcmp-chip-err { background: var(--dsw-alias-state-error-primary, #dc2626); }',
+      '.mcmp-chip-warn { background: var(--dsw-alias-state-warn-primary, #d97706); }',
       '@keyframes mcmp-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }',
-      '.mcmp-btn { border: none; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 14px; padding: 2px 6px; border-radius: 6px; line-height: 1.2; }',
-      '.mcmp-btn:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }',
+      '.mcmp-btn { border: none; background: transparent; color: var(--dsw-alias-label-primary); cursor: pointer; font-size: 14px; padding: 4px 9px; border-radius: 6px; line-height: 1; min-width: 26px; }',
+      '.mcmp-btn:hover { background: var(--dsw-alias-bg-layer-2); }',
       '.mcmp-body { padding: 10px; display: flex; flex-direction: column; gap: 8px; overflow-y: auto; }',
       '.mcmp-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }',
-      '.mcmp-label { color: var(--dsw-alias-label-secondary); }',
+      '.mcmp-label { color: var(--dsw-alias-label-secondary, #6b7280); }',
       '.mcmp-bar { height: 8px; border-radius: 999px; background: var(--dsw-alias-bg-layer-2); overflow: hidden; }',
-      '.mcmp-fill { height: 100%; border-radius: 999px; background: var(--dsw-alias-brand-primary); transition: width 0.5s ease; }',
+      '.mcmp-fill { height: 100%; border-radius: 999px; background: var(--dsw-alias-brand-primary, #2563eb); transition: width 0.5s ease; }',
       '.mcmp-pct { font-weight: 700; font-size: 14px; }',
       '.mcmp-cur { font-size: 12px; }',
       '.mcmp-steps { display: flex; flex-direction: column; gap: 3px; }',
       '.mcmp-step { display: flex; align-items: center; gap: 6px; padding: 2px 6px; border-radius: 6px; }',
       '.mcmp-step.active { background: var(--dsw-alias-bg-layer-1); }',
       '.mcmp-step .mname { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
-      '.mcmp-dots { color: var(--dsw-alias-label-secondary); letter-spacing: 1px; font-size: 11px; flex-shrink: 0; }',
-      '.mcmp-done-dot { color: var(--dsw-alias-state-success-primary); }',
-      '.mcmp-logs { font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; padding: 6px 8px; max-height: 96px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }',
+      '.mcmp-dots { color: var(--dsw-alias-label-secondary, #6b7280); letter-spacing: 1px; font-size: 11px; flex-shrink: 0; }',
+      '.mcmp-done-dot { color: var(--dsw-alias-state-success-primary, #16a34a); }',
+      '.mcmp-logs { font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: var(--dsw-alias-label-secondary, #6b7280); background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; padding: 6px 8px; max-height: 96px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }',
       '.mcmp-files { max-height: 140px; overflow-y: auto; background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; padding: 6px 8px; font-size: 11px; }',
-      '.mcmp-file { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--dsw-alias-label-secondary); }',
-      '.mcmp-error { color: var(--dsw-alias-state-error-primary); }',
+      '.mcmp-file { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--dsw-alias-label-secondary, #6b7280); }',
+      '.mcmp-error { color: var(--dsw-alias-state-error-primary, #dc2626); }',
       '.mcmp-actions { display: flex; gap: 8px; justify-content: flex-end; }',
       '.mcmp-actions .mcmp-btn { border: 1px solid var(--dsw-alias-border-l1); padding: 4px 12px; font-size: 12px; }',
-      '.mcmp-abort { color: var(--dsw-alias-state-error-primary); border-color: var(--dsw-alias-state-error-primary); }',
+      '.mcmp-abort { color: var(--dsw-alias-state-error-primary, #dc2626); border-color: var(--dsw-alias-state-error-primary, #dc2626); }',
     ].join('\n'))
 
     const h = React.createElement
@@ -77,9 +79,10 @@ return {
       const st = snap.status
       const pct = snap.pct
 
-      const onHeadDown = (e) => {
+      // 拖拽只绑定在标题文字上,避免指针捕获吞掉同栏按钮的点击
+      const onTitleDown = (e) => {
         if (e.button !== 0) return
-        const box = e.currentTarget.parentElement
+        const box = e.currentTarget.parentElement ? e.currentTarget.parentElement.parentElement : null
         if (!box) return
         const rect = box.getBoundingClientRect()
         box.setPointerCapture(e.pointerId)
@@ -123,11 +126,11 @@ return {
         : st === 'completed' ? '🎉 全部迭代已完成' : '等待中…'
 
       const children = []
-      children.push(h('div', { key: 'head', className: 'mcmp-head', onPointerDown: onHeadDown },
-        h('span', { className: 'mcmp-title' }, '数学建模论文流水线'),
+      children.push(h('div', { key: 'head', className: 'mcmp-head' },
+        h('span', { className: 'mcmp-title', title: '按住拖动面板', onPointerDown: onTitleDown }, '数学建模论文流水线'),
         h('span', { className: 'mcmp-chip mcmp-chip-' + (STATUS_CLASS[st] || '') }, STATUS_TEXT[st] || st),
-        h('button', { key: 'min', className: 'mcmp-btn', title: minimized ? '展开' : '最小化', onClick: () => setMinimized(!minimized) }, minimized ? '□' : '—'),
-        h('button', { key: 'close', className: 'mcmp-btn', title: '关闭', onClick: () => setDismissedRun(snap.runId) }, '×'),
+        h('button', { key: 'min', className: 'mcmp-btn', title: minimized ? '展开面板' : '最小化面板', onClick: () => setMinimized(!minimized) }, minimized ? '□' : '—'),
+        h('button', { key: 'close', className: 'mcmp-btn', title: '关闭面板', onClick: () => setDismissedRun(snap.runId) }, '×'),
       ))
       if (!minimized) {
         const body = []
