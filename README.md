@@ -48,13 +48,21 @@ DeepSeek Harness **动态 Cordis 插件**:面向全国大学生数学建模竞�
 
 ## 安装方式
 
+> 本仓库根目录**就是插件包本体**(`package.json` + `lib/`),与部署目录同构。
+
 ### 方式一:持久化安装(推荐,重启不丢)
 
-以正式插件包安装到用户配置层,DSH 每次启动自动加载。假设 Windows 环境、DSH 主目录为 `%USERPROFILE%\.dsh`(即 `$DSH_HOME`)。
+**一键部署(Windows PowerShell)**——在本仓库目录执行:
+
+```powershell
+.\deploy.ps1
+```
+
+脚本自动完成下面三步,然后重启 `dsh web` 并刷新网页即可。手动步骤如下:
 
 **1. 放置插件包**
 
-将 `persistent/` 下的文件放到配置层目录:
+把仓库根目录的 `package.json` 与 `lib/` 复制到配置层目录:
 
 ```
 $DSH_HOME/profiles/web/plugins/dsh-mcmp/
@@ -92,7 +100,7 @@ mklink /J "%USERPROFILE%\.dsh\profiles\node_modules\dsh-mcmp" "%USERPROFILE%\.ds
 
 适合试用与开发调试;DSH 重启后自动消失,需重新安装:
 
-1. 把 `host.js` 内容作为 `code.host`、`client.js` 内容作为 `code.client`,通过 `cordis_define` 定义插件;
+1. 把 `legacy/dynamic-host.js` 内容作为 `code.host`、`legacy/dynamic-client.js` 内容作为 `code.client`,通过 `cordis_define` 定义插件;
 2. `cordis_run` 激活(客户端包需在界面批准);
 3. 发送以 `/loopbegin` 开头的消息即可使用。
 
@@ -129,11 +137,15 @@ Client 插件(dsh-mcmp,标准 __ModuleLoader__ bundle)
 
 ## 文件说明
 
+> 仓库根目录即插件包本体,与部署目录 `$DSH_HOME/profiles/web/plugins/dsh-mcmp/` 同构。
+
 | 文件 | 内容 |
 | --- | --- |
-| `host.js` | Host 半源码(动态插件格式),即 `cordis_define` 的 `code.host` 参数 |
-| `client.js` | Client 半源码(动态插件格式),即 `cordis_define` 的 `code.client` 参数 |
-| `persistent/` | **固化版插件包**(推荐安装方式):`package.json` + `lib/index.js`(Host)+ `lib/client.js`(Client bundle),复制到配置层后按「安装方式」章节注册即可 |
+| `package.json` | 插件包清单:`dsh.client` 声明、`exports` 入口(`.` → Host,`./client` → 面板 bundle) |
+| `lib/index.js` | **Host 半**:命令注册、断点续跑、Host 侧子智能体编排、`/mcmp-api` 面板路由 |
+| `lib/client.js` | **Client 半**:浮动进度面板(标准 `__ModuleLoader__` bundle,`fetch` 轮询) |
+| `deploy.ps1` | 一键部署脚本:复制插件文件 → 建 junction → 注册插件行 |
+| `legacy/` | 历史动态插件源码(`dynamic-host.js` / `dynamic-client.js`),仅当前进程临时安装时参考 |
 
 ## 版本历史
 
