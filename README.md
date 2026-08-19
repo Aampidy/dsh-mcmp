@@ -79,21 +79,6 @@ pnpm dsh plugin --profile web update dsh-mcmp
 pnpm dsh plugin --profile web remove dsh-mcmp
 ```
 
-### 发布到 npm(维护者)
-
-```powershell
-npm login          # 首次需要登录(注册表账号)
-npm publish        # 发布后用户即可用上面的命令安装
-```
-
-### 方式三:动态插件安装(临时,仅当前进程)
-
-适合试用与开发调试;DSH 重启后自动消失,需重新安装:
-
-1. 把 `legacy/dynamic-host.js` 内容作为 `code.host`、`legacy/dynamic-client.js` 内容作为 `code.client`,通过 `cordis_define` 定义插件;
-2. `cordis_run` 激活(客户端包需在界面批准);
-3. 发送以 `/loopbegin` 开头的消息即可使用。
-
 ## 输出目录(工作区 `数学建模流水线/`)
 
 ```
@@ -135,18 +120,6 @@ Client 插件(dsh-mcmp,标准 __ModuleLoader__ bundle)
 | `cordis.patch.yml` | **bundle 补丁**:安装时自动注册插件行(`insert: mcmp`),无需手动编辑配置 |
 | `lib/index.js` | **Host 半**:命令注册、断点续跑、Host 侧子智能体编排、`/mcmp-api` 面板路由 |
 | `lib/client.js` | **Client 半**:浮动进度面板(标准 `__ModuleLoader__` bundle,`fetch` 轮询) |
-
-## 版本历史
-
-- **v1(pkg-1)**:斜杠命令触发(`/loopbegin`),8 步骤流水线、进度面板、成果落盘
-- **v2(pkg-2)**:新增消息内容触发(输入文本以 `/loopbegin` 开头即运行),注册模型提示避免重复执行
-- **v3(pkg-3)**:修复「工作流引擎不可用」——引擎从 Host 上下文三级回退到 Agent 上下文获取;工作流事件改为全局监听;`--from` 支持含空格/中文文件名;赛题随工作流参数传递、由 S1 首迭代落盘
-- **v4(pkg-4)**:重构为 **Host 侧直接编排子智能体**(`subagents` 服务),彻底摆脱工作流引擎的 Agent 上下文依赖——关闭/刷新聊天窗口不再中断流水线,后台继续执行;启动逻辑全部同步化,命令通道永不阻塞
-- **v5(pkg-5)**:移除 `maxDepth: 0` 参数(该语义会拒绝所有子智能体创建),改用部署默认深度限制
-- **v6(pkg-6)**:①**断点续跑**——启动时扫描会话日志中落盘的工作流记录,自动跳过已完成的迭代,中断/重启后不再从头开始;新增 `--fresh` 强制重跑;②修复浮动面板 ×/— 按钮被拖拽指针捕获吞掉点击的问题(拖拽仅绑定标题文字);③提升状态徽章对比度与按钮可点击区域
-- **v7(pkg-7)**:**提示词优化**——明确"产出可提交论文级内容"的目标;新增五条工作纪律(质疑先行并逐条给出处理决定、只改有据之处、禁止编造数据、符号与术语一致、论文级表达);明确回复结构(质疑清单→工作成果→文件清单总结)
-- **v8(固化版)**:**持久化部署插件**——以正式插件包(`dsh-mcmp`)发布到 npm,`dsh plugin add` 一键安装,DSH 重启后自动加载。声明 `inject` 硬依赖等待服务就绪,面板 RPC 改为 `webServer` 路由(`/mcmp-api/*`),客户端为标准 `__ModuleLoader__` bundle + fetch
-- **v9(npm bundle 版)**:包声明 `dsh.bundle` 补丁,`dsh plugin add` 后**自动注册插件行**,无需任何手动步骤;移除本地安装脚本(`deploy.ps1`)与历史动态源码(`legacy/`),仓库只保留单一 npm 安装路径
 
 ## License
 
