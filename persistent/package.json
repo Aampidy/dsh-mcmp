@@ -1,0 +1,22 @@
+{
+  "name": "dsh-mcmp",
+  "version": "6.0.0",
+  "private": true,
+  "description": "DeepSeek Harness 持久化插件:数学建模论文自动化流水线(8 步骤 × 19 迭代 × N 轮、质疑驱动、断点续跑、进度面板)",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ]
+    }
+  },
+  "license": "MIT"
+}
