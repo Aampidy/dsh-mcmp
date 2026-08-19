@@ -50,15 +50,38 @@ DeepSeek Harness **动态 Cordis 插件**:面向全国大学生数学建模竞�
 
 > 本仓库根目录**就是插件包本体**(`package.json` + `lib/`),与部署目录同构。
 
-### 方式一:持久化安装(推荐,重启不丢)
+### 方式一:`dsh plugin add` 安装(推荐,需插件已发布到 npm)
 
-**一键部署(Windows PowerShell)**——在本仓库目录执行:
+与官方插件相同的安装体验,一条命令安装、注册:
+
+```powershell
+# 1. 安装插件包(等价于在 profile 目录执行 pnpm add,链接进 profile 的 node_modules)
+pnpm dsh plugin --profile web add dsh-mcmp
+#    其他等价的调用形式:
+#    dsh plugin --profile web add dsh-mcmp
+#    npx @deepseek-ai/dsh plugin --profile web add dsh-mcmp
+
+# 2. 注册配置行(在本仓库目录执行)
+.\deploy.ps1 -RowOnly
+
+# 3. 重启并刷新
+#    重启 pnpm dsh web → 刷新网页 → 访问 /mcmp-api/state 返回 JSON 即成功
+```
+
+**卸载**:
+
+```powershell
+pnpm dsh plugin --profile web remove dsh-mcmp   # 移除包
+# 并删除 cordis.patch.yml 中的插件行(或恢复 cordis.patch.yml.bak)
+```
+
+### 方式二:本地一键安装(插件未发布到 npm 时)
 
 ```powershell
 .\deploy.ps1
 ```
 
-脚本自动完成下面三步,然后重启 `dsh web` 并刷新网页即可。手动步骤如下:
+脚本自动完成:复制插件文件 → 建立 node_modules junction → 注册配置行,然后重启 `dsh web` 并刷新网页即可。手动步骤如下:
 
 **1. 放置插件包**
 
@@ -94,9 +117,14 @@ mklink /J "%USERPROFILE%\.dsh\profiles\node_modules\dsh-mcmp" "%USERPROFILE%\.ds
 - 验证接口:浏览器访问 `http://127.0.0.1:3080/mcmp-api/state`,返回 JSON 即安装成功;
 - 之后任何重启都无需再安装,`/loopbegin` 永久可用。
 
-**卸载**:删除 `cordis.patch.yml` 中的插件行(或恢复备份 `cordis.patch.yml.bak`),移除 junction 与 `plugins/dsh-mcmp/` 目录。
+### 发布到 npm(维护者)
 
-### 方式二:动态插件安装(临时,仅当前进程)
+```powershell
+npm login          # 首次需要登录(注册表账号)
+npm publish        # 发布后即可用「方式一」安装
+```
+
+### 方式三:动态插件安装(临时,仅当前进程)
 
 适合试用与开发调试;DSH 重启后自动消失,需重新安装:
 

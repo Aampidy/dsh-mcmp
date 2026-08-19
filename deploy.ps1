@@ -1,6 +1,17 @@
-# dsh-mcmp 一键部署脚本:把本仓库(插件包)安装到 DSH 用户配置层
-# 用法:在本仓库目录执行  .\deploy.ps1
-# 脚本执行三件事:复制插件文件 → 建立 node_modules junction → 注册 cordis.patch.yml 插件行
+# dsh-mcmp 部署脚本
+#
+# 用法 A(npm 安装后,只需注册插件行):
+#   pnpm dsh plugin --profile web add dsh-mcmp
+#   .\deploy.ps1 -RowOnly
+#
+# 用法 B(本地安装,未发布到 npm):
+#   .\deploy.ps1
+#
+# 两种用法完成后都需要:重启 dsh web,刷新网页。
+param(
+  [switch]$RowOnly
+)
+
 $ErrorActionPreference = 'Stop'
 
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -14,21 +25,26 @@ if (-not (Test-Path (Join-Path $home 'profiles\web'))) {
   throw "未找到 $home\profiles\web —— 请先运行一次 dsh web 生成 profile"
 }
 
-# 1. 复制插件文件(仓库根目录即插件包)
-New-Item -ItemType Directory -Path $target -Force | Out-Null
-Copy-Item (Join-Path $repo 'package.json') $target -Force
-Copy-Item (Join-Path $repo 'lib') $target -Recurse -Force
+if (-not $RowOnly) {
+  # 1. 复制插件文件(仓库根目录即插件包)
+  New-Item -ItemType Directory -Path $target -Force | Out-Null
+  Copy-Item (Join-Path $repo 'package.json') $target -Force
+  Copy-Item (Join-Path $repo 'lib') $target -Recurse -Force
+  Write-Host '插件文件已复制'
 
-# 2. 建立 junction(供 cordis 按包名 dsh-mcmp 解析)
-if (Test-Path $link) {
-  if ((Get-Item $link).LinkType -ne 'Junction') {
-    throw "$link 已存在且不是 junction,请手动处理后重试"
+  # 2. 建立/识别 node_modules 链接
+  if (Test-Path $link) {
+    $item = Get-Item $link
+    if ($item.LinkType -eq 'Junction') {
+      Write-Host 'junction 已存在,跳过'
+    } else {
+      Write-Host '检测到 pnpm 管理的包链接(可能来自 dsh plugin add),跳过'
+    }
+  } else {
+    cmd /c mklink /J $link $target | Out-Null
+    if (-not (Test-Path $link)) { throw 'junction 创建失败' }
+    Write-Host 'junction 已创建'
   }
-  Write-Host 'junction 已存在,跳过'
-} else {
-  cmd /c mklink /J $link $target | Out-Null
-  if (-not (Test-Path $link)) { throw 'junction 创建失败' }
-  Write-Host 'junction 已创建'
 }
 
 # 3. 注册插件行(必须用 insert 列表语法;已注册则跳过)
@@ -43,6 +59,6 @@ if ($content -notmatch 'name:\s*dsh-mcmp') {
 
 Write-Host ''
 Write-Host '部署完成。下一步:'
-Write-Host '  1. 重启 dsh web(结束进程后重新运行 dsh web)'
+Write-Host '  1. 重启 dsh web(结束进程后重新运行 pnpm dsh web)'
 Write-Host '  2. 刷新网页'
 Write-Host '  3. 验证:浏览器访问 /mcmp-api/state,返回 JSON 即安装成功'
