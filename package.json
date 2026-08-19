@@ -1,6 +1,6 @@
 {
   "name": "dsh-mcmp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "DeepSeek Harness 插件:数学建模论文自动化流水线(8 步骤 × 19 迭代 × N 轮、质疑驱动、断点续跑、进度面板)",
   "type": "module",
   "main": "lib/index.js",
@@ -10,9 +10,13 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib"
+    "lib",
+    "cordis.patch.yml"
   ],
   "dsh": {
+    "bundle": {
+      "patch": "cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "inject": [

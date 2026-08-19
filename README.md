@@ -50,80 +50,40 @@ DeepSeek Harness **动态 Cordis 插件**:面向全国大学生数学建模竞�
 
 ## 安装方式
 
-> 本仓库根目录**就是插件包本体**(`package.json` + `lib/`),与部署目录同构。
+> 插件包已发布到 npm([dsh-mcmp](https://www.npmjs.com/package/dsh-mcmp)),并声明了 `dsh.bundle`
+> 补丁:安装后**自动注册配置行**,无需任何手动步骤。
 
-### 方式一:`dsh plugin add` 安装(推荐,已发布到 npm)
-
-与官方插件相同的安装体验,一条命令安装、注册:
+### 安装(唯一方式)
 
 ```powershell
-# 1. 安装插件包(等价于在 profile 目录执行 pnpm add,链接进 profile 的 node_modules)
+# 一条命令完成:安装包 + 自动注册(通过 bundle 机制)
 pnpm dsh plugin --profile web add dsh-mcmp
-#    其他等价的调用形式:
-#    dsh plugin --profile web add dsh-mcmp
-#    npx @deepseek-ai/dsh plugin --profile web add dsh-mcmp
+# 等价调用形式:
+#   dsh plugin --profile web add dsh-mcmp
+#   npx @deepseek-ai/dsh plugin --profile web add dsh-mcmp
 
-# 2. 注册配置行(在本仓库目录执行)
-.\deploy.ps1 -RowOnly
+# 然后重启:
+#   重启 pnpm dsh web → 刷新网页
+#   验证:浏览器访问 /mcmp-api/state,返回 JSON 即成功
+```
 
-# 3. 重启并刷新
-#    重启 pnpm dsh web → 刷新网页 → 访问 /mcmp-api/state 返回 JSON 即成功
+**升级**:
+
+```powershell
+pnpm dsh plugin --profile web update dsh-mcmp
 ```
 
 **卸载**:
 
 ```powershell
-pnpm dsh plugin --profile web remove dsh-mcmp   # 移除包
-# 并删除 cordis.patch.yml 中的插件行(或恢复 cordis.patch.yml.bak)
+pnpm dsh plugin --profile web remove dsh-mcmp
 ```
-
-### 方式二:本地一键安装(插件未发布到 npm 时)
-
-```powershell
-.\deploy.ps1
-```
-
-脚本自动完成:复制插件文件 → 建立 node_modules junction → 注册配置行,然后重启 `dsh web` 并刷新网页即可。手动步骤如下:
-
-**1. 放置插件包**
-
-把仓库根目录的 `package.json` 与 `lib/` 复制到配置层目录:
-
-```
-$DSH_HOME/profiles/web/plugins/dsh-mcmp/
-├── package.json        # dsh.client 声明 + 包入口
-└── lib/
-    ├── index.js        # Host 半:命令、编排、断点续跑、/mcmp-api 路由
-    └── client.js       # Client 半:浮动进度面板(__ModuleLoader__ bundle)
-```
-
-**2. 建立包解析链接**(Windows 无需管理员权限)
-
-```cmd
-mklink /J "%USERPROFILE%\.dsh\profiles\node_modules\dsh-mcmp" "%USERPROFILE%\.dsh\profiles\web\plugins\dsh-mcmp"
-```
-
-**3. 在配置层注册插件行**
-
-编辑 `$DSH_HOME/profiles/web/cordis.patch.yml`,追加(注意必须用 `insert:` 列表语法):
-
-```yaml
-- insert:
-    - id: mcmp
-      name: dsh-mcmp
-```
-
-**4. 重启并验证**
-
-- 重启 `dsh web`,刷新网页(插件随启动加载,面板 bundle 注入启动清单);
-- 验证接口:浏览器访问 `http://127.0.0.1:3080/mcmp-api/state`,返回 JSON 即安装成功;
-- 之后任何重启都无需再安装,`/loopbegin` 永久可用。
 
 ### 发布到 npm(维护者)
 
 ```powershell
 npm login          # 首次需要登录(注册表账号)
-npm publish        # 发布后即可用「方式一」安装
+npm publish        # 发布后用户即可用上面的命令安装
 ```
 
 ### 方式三:动态插件安装(临时,仅当前进程)
@@ -167,15 +127,14 @@ Client 插件(dsh-mcmp,标准 __ModuleLoader__ bundle)
 
 ## 文件说明
 
-> 仓库根目录即插件包本体,与部署目录 `$DSH_HOME/profiles/web/plugins/dsh-mcmp/` 同构。
+> 仓库根目录即插件包本体(发布到 npm 的内容 = `lib/` + `cordis.patch.yml` + `package.json`)。
 
 | 文件 | 内容 |
 | --- | --- |
-| `package.json` | 插件包清单:`dsh.client` 声明、`exports` 入口(`.` → Host,`./client` → 面板 bundle) |
+| `package.json` | 插件包清单:`dsh.bundle` 补丁声明、`dsh.client` 声明、`exports` 入口(`.` → Host,`./client` → 面板 bundle) |
+| `cordis.patch.yml` | **bundle 补丁**:安装时自动注册插件行(`insert: mcmp`),无需手动编辑配置 |
 | `lib/index.js` | **Host 半**:命令注册、断点续跑、Host 侧子智能体编排、`/mcmp-api` 面板路由 |
 | `lib/client.js` | **Client 半**:浮动进度面板(标准 `__ModuleLoader__` bundle,`fetch` 轮询) |
-| `deploy.ps1` | 一键部署脚本:复制插件文件 → 建 junction → 注册插件行 |
-| `legacy/` | 历史动态插件源码(`dynamic-host.js` / `dynamic-client.js`),仅当前进程临时安装时参考 |
 
 ## 版本历史
 
@@ -186,7 +145,8 @@ Client 插件(dsh-mcmp,标准 __ModuleLoader__ bundle)
 - **v5(pkg-5)**:移除 `maxDepth: 0` 参数(该语义会拒绝所有子智能体创建),改用部署默认深度限制
 - **v6(pkg-6)**:①**断点续跑**——启动时扫描会话日志中落盘的工作流记录,自动跳过已完成的迭代,中断/重启后不再从头开始;新增 `--fresh` 强制重跑;②修复浮动面板 ×/— 按钮被拖拽指针捕获吞掉点击的问题(拖拽仅绑定标题文字);③提升状态徽章对比度与按钮可点击区域
 - **v7(pkg-7)**:**提示词优化**——明确"产出可提交论文级内容"的目标;新增五条工作纪律(质疑先行并逐条给出处理决定、只改有据之处、禁止编造数据、符号与术语一致、论文级表达);明确回复结构(质疑清单→工作成果→文件清单总结)
-- **v8(固化版)**:**持久化部署插件**——以正式插件包(`dsh-mcmp`)写入用户配置层 `$DSH_HOME/profiles/web/cordis.patch.yml`,DSH 重启后自动加载,不再依赖动态安装。声明 `inject` 硬依赖等待服务就绪,面板 RPC 改为 `webServer` 路由(`/mcmp-api/*`),客户端为标准 `__ModuleLoader__` bundle + fetch。源码见 `persistent/` 目录
+- **v8(固化版)**:**持久化部署插件**——以正式插件包(`dsh-mcmp`)发布到 npm,`dsh plugin add` 一键安装,DSH 重启后自动加载。声明 `inject` 硬依赖等待服务就绪,面板 RPC 改为 `webServer` 路由(`/mcmp-api/*`),客户端为标准 `__ModuleLoader__` bundle + fetch
+- **v9(npm bundle 版)**:包声明 `dsh.bundle` 补丁,`dsh plugin add` 后**自动注册插件行**,无需任何手动步骤;移除本地安装脚本(`deploy.ps1`)与历史动态源码(`legacy/`),仓库只保留单一 npm 安装路径
 
 ## License
 

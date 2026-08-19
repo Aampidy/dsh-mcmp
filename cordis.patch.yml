@@ -1,0 +1,5 @@
+# dsh-mcmp bundle 补丁:作为 profile bundle 层自动注册插件行
+# 通过 dsh.plugin add/update 安装本包后,启动时自动应用本补丁,无需手动编辑配置
+- insert:
+    - id: mcmp
+      name: dsh-mcmp
