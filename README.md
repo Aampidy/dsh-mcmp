@@ -123,7 +123,7 @@ Client 插件(dsh-mcmp,标准 __ModuleLoader__ bundle)
 
 ## 文件说明
 
-> 仓库根目录即插件包本体(发布到 npm 的内容 = `lib/` + `cordis.patch.yml` + `package.json`)。
+> 仓库根目录即插件包本体(发布到 npm 的内容 = `lib/` + `cordis.patch.yml` + `package.json`;`tests/` 不随包发布)。
 
 | 文件 | 内容 |
 | --- | --- |
@@ -131,6 +131,7 @@ Client 插件(dsh-mcmp,标准 __ModuleLoader__ bundle)
 | `cordis.patch.yml` | **bundle 补丁**:安装时自动注册插件行(`insert: mcmp`),无需手动编辑配置 |
 | `lib/index.js` | **Host 半**:命令注册、识图能力探测、断点续跑、Host 侧子智能体编排(8 步骤 + 兜底定稿)、`/mcmp-api` 面板路由 |
 | `lib/client.js` | **Client 半**:浮动进度面板(标准 `__ModuleLoader__` bundle,`fetch` 轮询) |
+| `tests/smoke.mjs` | **冒烟测试**:伪造 Cordis ctx 驱动插件,验证启动/触发/断点续跑(含多轮)/中止/兜底/`--from`/识图探测等路径,`node tests/smoke.mjs`(不随 npm 包发布) |
 
 ## License
 
