@@ -20,7 +20,8 @@ function makeHarness({ events = [], toolsSchemas = [], subagentBehavior } = {}) 
     id: 's-test',
     header: { cwd: 'C:\\ws\\demo', origin: 'user' },
     events,
-    append(type, data) { calls.appends.push({ type, data }) },
+    // 与真实 DSH 一致:append 既记录事件,也写回会话日志(续跑扫描依赖后者)
+    append(type, data) { calls.appends.push({ type, data }); session.events.push({ type, data }) },
   }
   const agent = { session }
   let children = 0
@@ -197,6 +198,50 @@ console.log('== T10 触发器:以 /loopbegin 开头的用户消息自动启动 =
   listener.fn(fakeSession, fakeEvent)
   await sleep(60)
   check('T10 触发器自动启动并执行 19 个迭代', h.getChildren() === 19, 'children=' + h.getChildren())
+}
+
+console.log('== T11 重置记录:完成后重置 → 下次全新开始 ==')
+{
+  const h = makeHarness({ events: [PROBLEM_EVENT] })
+  const r1 = run(h, '/loopbegin')
+  check('T11 首次运行启动成功', r1 && r1.kind === 'success')
+  await sleep(60)
+  check('T11 首次运行完成 19 个迭代', h.getChildren() === 19, 'children=' + h.getChildren())
+  // 不重置 → 再次启动应提示已完成
+  const r2 = run(h, '/loopbegin')
+  check('T11 不重置时提示无需重复', r2 && r2.kind === 'error' && /已完成 19/.test(r2.text), r2 && r2.text)
+  // 重置(面板按钮路径:POST /reset)
+  let status = 0, body = null
+  h.calls.routes[0].handler({ method: 'POST', url: '/mcmp-api/reset' }, { writeHead(c) { status = c }, end(b) { body = JSON.parse(b) } })
+  check('T11 POST /reset 成功', status === 200 && body && body.ok === true)
+  check('T11 会话中追加了重置标记', h.calls.appends.some((a) => a.type === 'tool-workflow/mcmp-reset'))
+  // 重置后再启动 → 全新运行
+  const r3 = run(h, '/loopbegin')
+  check('T11 重置后再启动为全新运行', r3 && r3.kind === 'success' && /全新运行/.test(r3.text) && !/断点续跑:已跳过/.test(r3.text), r3 && r3.text)
+  await sleep(60)
+  check('T11 重置后再次执行 19 个迭代', h.getChildren() === 38, 'children=' + h.getChildren())
+}
+
+console.log('== T12 /loopreset 命令 ==')
+{
+  const h = makeHarness({ events: [PROBLEM_EVENT] })
+  const cmd = h.byName('loopreset')
+  check('T12 /loopreset 已注册', Boolean(cmd))
+  const r0 = cmd.handler()
+  check('T12 空闲时可重置', r0 && r0.kind === 'success' && /从头|全新开始/.test(r0.text), r0 && r0.text)
+}
+
+console.log('== T13 中止部分进度 → 重置 → 全新开始(不续跑) ==')
+{
+  const h = makeHarness({ events: [PROBLEM_EVENT] })
+  run(h, '/loopbegin')
+  h.calls.routes[0].handler({ method: 'POST', url: '/mcmp-api/abort' }, { writeHead() {}, end() {} })
+  await sleep(60)
+  check('T13 中止生效', lastRunEnd(h).data.stopReason === 'cancelled')
+  // 重置
+  h.calls.routes[0].handler({ method: 'POST', url: '/mcmp-api/reset' }, { writeHead() {}, end() {} })
+  const r = run(h, '/loopbegin')
+  check('T13 重置后再启动为全新运行', r && r.kind === 'success' && /全新运行/.test(r.text) && !/断点续跑:已跳过/.test(r.text), r && r.text)
 }
 
 console.log(failures === 0 ? '\n全部通过 ✓' : '\n' + failures + ' 项失败 ✗')
