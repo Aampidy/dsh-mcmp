@@ -16,6 +16,7 @@ const PROBLEM_EVENT = { type: 'user/message', data: { content: [{ type: 'text', 
 
 function makeHarness({ events = [], toolsSchemas = [], subagentBehavior } = {}) {
   const calls = { commands: [], routes: [], sections: [], listeners: [], appends: [] }
+  const signals = [] // 每个子任务收到的 signal,用于验证中止链路
   const session = {
     id: 's-test',
     header: { cwd: 'C:\\ws\\demo', origin: 'user' },
@@ -30,12 +31,17 @@ function makeHarness({ events = [], toolsSchemas = [], subagentBehavior } = {}) 
     async start(provider, req) {
       children++
       const idx = children
+      signals.push(req.signal)
       const r = typeof subagentBehavior === 'function'
         ? subagentBehavior(idx, req)
         : { text: 'ok ' + idx, stopReason: 'completed' }
+      const delay = typeof r.delay === 'number' ? r.delay : 0
       return {
         id: 'c' + idx,
-        result: Promise.resolve({ output: [{ type: 'text', text: r.text }], stopReason: r.stopReason }),
+        result: (async () => {
+          if (delay > 0) await new Promise((res) => setTimeout(res, delay))
+          return { output: [{ type: 'text', text: r.text }], stopReason: r.stopReason }
+        })(),
         dispose: async () => {},
       }
     },
@@ -57,7 +63,7 @@ function makeHarness({ events = [], toolsSchemas = [], subagentBehavior } = {}) 
   }
   apply(ctx)
   const byName = (n) => calls.commands.find((c) => c.name === n)
-  return { calls, session, agent, byName, getChildren: () => children }
+  return { calls, session, agent, byName, getChildren: () => children, signals: () => signals }
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -242,6 +248,27 @@ console.log('== T13 中止部分进度 → 重置 → 全新开始(不续跑) ==
   h.calls.routes[0].handler({ method: 'POST', url: '/mcmp-api/reset' }, { writeHead() {}, end() {} })
   const r = run(h, '/loopbegin')
   check('T13 重置后再启动为全新运行', r && r.kind === 'success' && /全新运行/.test(r.text) && !/断点续跑:已跳过/.test(r.text), r && r.text)
+}
+
+console.log('== T14 中止在兜底定稿阶段也能生效(控制器登记) ==')
+{
+  const h = makeHarness({
+    events: [PROBLEM_EVENT],
+    // 第 2 个子任务 = 兜底定稿,让它运行 150ms,期间发出第二次中止
+    subagentBehavior: (i) => (i === 2 ? { text: 'paper', stopReason: 'completed', delay: 150 } : { text: 'x', stopReason: 'completed' }),
+  })
+  run(h, '/loopbegin')
+  // 第一次中止:主流程(第 1 个子任务)后 break → 进入兜底定稿
+  h.calls.routes[0].handler({ method: 'POST', url: '/mcmp-api/abort' }, { writeHead() {}, end() {} })
+  await sleep(60)
+  const sigs = h.signals()
+  check('T14 兜底定稿子任务已启动(第 2 个 signal)', sigs.length >= 2, 'signals=' + sigs.length)
+  check('T14 兜底定稿使用独立的新控制器', sigs[1] !== sigs[0])
+  // 第二次中止:应作用于兜底定稿的新控制器(此时兜底定稿仍在运行)
+  h.calls.routes[0].handler({ method: 'POST', url: '/mcmp-api/abort' }, { writeHead() {}, end() {} })
+  check('T14 第二次中止能 abort 兜底定稿的 signal', sigs[1] && sigs[1].aborted === true, 'sig2.aborted=' + (sigs[1] && sigs[1].aborted))
+  await sleep(200)
+  check('T14 run-end 为 cancelled', lastRunEnd(h).data.stopReason === 'cancelled', JSON.stringify(lastRunEnd(h) && lastRunEnd(h).data))
 }
 
 console.log(failures === 0 ? '\n全部通过 ✓' : '\n' + failures + ' 项失败 ✗')

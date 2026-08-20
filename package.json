@@ -1,6 +1,6 @@
 {
   "name": "dsh-mcmp",
-  "version": "2.1.2",
+  "version": "2.1.3",
   "description": "DeepSeek Harness 插件:数学建模论文自动化流水线 v2(8 步骤 × 19 迭代 × N 轮:图表视觉自检与修复、评审问题修复闭环、跨步骤缺陷台账与向上修复、论文兜底定稿、质疑驱动、断点续跑、进度面板)",
   "type": "module",
   "main": "lib/index.js",
