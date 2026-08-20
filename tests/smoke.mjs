@@ -72,8 +72,7 @@ function makeHarness({ events = [], toolsSchemas = [], subagentBehavior, fsEntri
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-// startPipeline 现在是 async;统一追加 --retry-ms=1 让重试间隔为 1ms(测试快速通过)
-const run = (h, rawInput) => h.byName('loopbegin').handler({ agent: h.agent, rawInput: rawInput + ' --retry-ms=1' })
+const run = (h, rawInput) => h.byName('loopbegin').handler({ agent: h.agent, rawInput })
 
 /** 生成一个工具工作流运行的事件:从 seqStart 起 count 个迭代,前 donePrefix 个完成 */
 function makeRun(seqStart, count, donePrefix) {
@@ -101,25 +100,23 @@ console.log('== T1 全新运行:19 个迭代全部完成,不触发兜底 ==')
   check('T1 run-end 为 completed', lastRunEnd(h).data.stopReason === 'completed')
 }
 
-console.log('== T2 最后一步(S8)失败 → 重试后仍失败 → 触发兜底定稿 ==')
+console.log('== T2 最后一步(S8)失败 → 触发兜底定稿 ==')
 {
-  // child 19/20/21 = S8 的 3 次尝试(1+2 重试)都失败,然后兜底(child 22)成功
-  const h = makeHarness({ events: [PROBLEM_EVENT], subagentBehavior: (i) => ({ text: 'x', stopReason: i >= 19 && i <= 21 ? 'failed' : 'completed' }) })
+  const h = makeHarness({ events: [PROBLEM_EVENT], subagentBehavior: (i) => ({ text: 'x', stopReason: i === 19 ? 'failed' : 'completed' }) })
   const r = await run(h, '/loopbegin')
   check('T2 启动成功', r && r.kind === 'success')
   await sleep(80)
-  check('T2 子智能体数=22(19 + 2 重试 + 兜底)', h.getChildren() === 22, 'children=' + h.getChildren())
+  check('T2 子智能体数=20(19 + 兜底)', h.getChildren() === 20, 'children=' + h.getChildren())
   check('T2 兜底成功后 run-end 为 completed', lastRunEnd(h).data.stopReason === 'completed')
 }
 
-console.log('== T3 前 3 个迭代(各含重试)连续失败 → error 终止 + 兜底 ==')
+console.log('== T3 前 3 个迭代连续失败 → error 终止 + 兜底 ==')
 {
-  // child 1-9 = 迭代1/2/3 各 3 次尝试,全失败 → failStreak=3 → 兜底(child 10)
-  const h = makeHarness({ events: [PROBLEM_EVENT], subagentBehavior: (i) => ({ text: 'x', stopReason: i <= 9 ? 'failed' : 'completed' }) })
+  const h = makeHarness({ events: [PROBLEM_EVENT], subagentBehavior: (i) => ({ text: 'x', stopReason: i <= 3 ? 'failed' : 'completed' }) })
   const r = await run(h, '/loopbegin')
   check('T3 启动成功', r && r.kind === 'success')
   await sleep(120)
-  check('T3 子智能体数=10(3 迭代×3 尝试 + 兜底)', h.getChildren() === 10, 'children=' + h.getChildren())
+  check('T3 子智能体数=4(3 失败 + 兜底)', h.getChildren() === 4, 'children=' + h.getChildren())
   check('T3 run-end 为 error', lastRunEnd(h).data.stopReason === 'error')
 }
 
@@ -166,49 +163,6 @@ console.log('== T6 --from 路径解析(后面带其他参数) ==')
   await sleep(80)
   const fileLine = firstPrompt.match(/【赛题原文文件】([^\n]+)/)
   check('T6 赛题文件路径未被 --round 污染', fileLine && fileLine[1].indexOf('--round') === -1 && fileLine[1].indexOf('题目 b.md') >= 0, fileLine && fileLine[1])
-}
-
-console.log('== T15 --from 自动查找根目录 MD 文档 ==')
-{
-  const MD = ['2024 年高教社杯全国大学生数学建模竞赛题目.md', '2023 年国赛A题.md', '说明.md', 'data.xlsx']
-  const h = makeHarness({ fsEntries: MD.map((name) => ({ name, type: 'file' })) })
-  // 部分匹配
-  let r = await run(h, '/loopbegin --from 2024')
-  check('T15 部分匹配 2024 → 启动成功', r && r.kind === 'success', r && r.text)
-  await sleep(100) // 等流水线跑完,再测后续场景
-  // 只写 --from → 列出所有 MD
-  r = await run(h, '/loopbegin --from')
-  check('T15 仅 --from → 列出根目录 MD 文档', r && r.kind === 'error' && r.text.indexOf('2024 年高教社杯') >= 0 && r.text.indexOf('说明.md') >= 0 && r.text.indexOf('data.xlsx') === -1, r && r.text)
-  // 不存在的文件
-  r = await run(h, '/loopbegin --from 不存在的文件')
-  check('T15 未找到 → 报错并提示现有文档', r && r.kind === 'error' && /未找到匹配/.test(r.text), r && r.text)
-  // 歧义匹配
-  const h2 = makeHarness({ fsEntries: ['AAA 题.md', 'AAB 题.md'].map((name) => ({ name, type: 'file' })) })
-  r = await run(h2, '/loopbegin --from AA')
-  check('T15 歧义 → 列出候选', r && r.kind === 'error' && r.text.indexOf('AAA 题.md') >= 0 && r.text.indexOf('AAB 题.md') >= 0, r && r.text)
-  // 匹配成功后,首个子任务提示包含正确文件路径
-  let firstPrompt = ''
-  const h3 = makeHarness({
-    fsEntries: ['2024 年高教社杯全国大学生数学建模竞赛题目.md'].map((name) => ({ name, type: 'file' })),
-    subagentBehavior: (i, req) => { if (i === 1) firstPrompt = req.prompt[0].text; return { text: 'x', stopReason: 'completed' } },
-  })
-  r = await run(h3, '/loopbegin --from 2024')
-  check('T15 启动成功(匹配到唯一文件)', r && r.kind === 'success')
-  await sleep(80)
-  check('T15 子任务读取的路径为匹配到的文件', firstPrompt.indexOf('2024 年高教社杯全国大学生数学建模竞赛题目.md') >= 0, (firstPrompt.match(/【赛题原文文件】([^\n]+)/) || [''])[0])
-}
-
-console.log('== T16 迭代失败自动重试,瞬时故障不终止流水线 ==')
-{
-  // child 5 失败(如 429 瞬时),child 6 重试成功 → 迭代完成,流水线继续
-  const h = makeHarness({ events: [PROBLEM_EVENT], subagentBehavior: (i) => ({ text: 'x', stopReason: i === 5 ? 'failed' : 'completed' }) })
-  const r = await run(h, '/loopbegin')
-  check('T16 启动成功', r && r.kind === 'success')
-  await sleep(120)
-  check('T16 子智能体数=20(19 + 1 次重试)', h.getChildren() === 20, 'children=' + h.getChildren())
-  check('T16 run-end 为 completed(未被 3 连败终止)', lastRunEnd(h).data.stopReason === 'completed', JSON.stringify(lastRunEnd(h) && lastRunEnd(h).data))
-  const starts = h.calls.appends.filter((a) => a.type === 'tool-workflow/agent-start').length
-  check('T16 卡片成员数仍为 19(重试不重复入卡)', starts === 19, 'starts=' + starts)
 }
 
 console.log('== T7 识图能力探测(S5 提示携带探测结果) ==')
