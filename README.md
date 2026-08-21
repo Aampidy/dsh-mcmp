@@ -104,23 +104,31 @@ pnpm dsh plugin --profile web remove dsh-mcmp
 
 ## 架构
 
+> 插件按职责拆分为三个模块:程序入口(lib/index.js)、论文写作主循环(lib/pipeline.js)、显示界面(lib/client.js)。
+
 ```
 用户消息(/loopbegin 开头)
    │  session/event 全局监听(或 commands 斜杠命令)
    ▼
-Host 插件(dsh-mcmp,HOST 组合)
-   ├─ 提取赛题(对话文本或 --from 文件)
+程序入口模块(lib/index.js)
+   ├─ 输入框内检测:斜杠命令注册 + 消息触发监听 + systemPrompt 模型侧提示
+   ├─ 模型选择:父对话当前选择 / --model 显式覆盖 / 兜底 DeepSeek V4 Flash
+   ├─ 题目检测:提取赛题(对话文本或 --from 文件)
    ├─ 识图能力探测(宿主服务/工具注册表扫描;S5 子智能体再自检,以自检为准)
+   └─ 启动解析与校验(--round/--fresh/--model/--from)→ 委托主循环模块启动
+   ▼
+论文写作主循环模块(lib/pipeline.js,createPipeline 实例)
    ├─ 断点续跑:扫描会话日志中 tool-workflow/* v2 记录,跳过已完成迭代
    ├─ 编排器:按 8 步骤 × 19 迭代 × N 轮逐个启动专家子智能体(subagents.spawn)
-   │       子智能体:读必读文件 → 质疑先行 → 完成任务 → 追加落盘 → 返回总结
+   │       子智能体:读必读文件 → 质疑先行(质疑驱动)→ 完成任务 → 追加落盘 → 返回总结
    ├─ 兜底定稿:若 S8 未完成(出错/中止),追加一次子智能体组装完整 论文定稿.md
    ├─ 向会话追加 tool-workflow/* 事件 → 聊天区原生工作流卡片
-   └─ 面板 API:webServer 路由 /mcmp-api/{state,abort,reset}
-   ▲
-Client 插件(dsh-mcmp,标准 __ModuleLoader__ bundle)
+   └─ 运行状态/进度快照/中止/重置:供入口命令与面板 API 调用
+   ▼
+显示界面模块(lib/client.js,标准 __ModuleLoader__ bundle)
    ├─ shell.overlay 浮动面板,每 1.2s fetch('/mcmp-api/state') 轮询
    └─ 进度条/步骤打点/日志/文件/中止按钮(拖拽仅绑定标题文字)
+   (面板 API 路由 /mcmp-api/{state,abort,reset} 由程序入口模块注册并转发)
 ```
 
 ## 文件说明
@@ -131,8 +139,9 @@ Client 插件(dsh-mcmp,标准 __ModuleLoader__ bundle)
 | --- | --- |
 | `package.json` | 插件包清单:`dsh.bundle` 补丁声明、`dsh.client` 声明、`exports` 入口(`.` → Host,`./client` → 面板 bundle) |
 | `cordis.patch.yml` | **bundle 补丁**:安装时自动注册插件行(`insert: mcmp`),无需手动编辑配置 |
-| `lib/index.js` | **Host 半**:命令注册、识图能力探测、断点续跑、Host 侧子智能体编排(8 步骤 + 兜底定稿)、`/mcmp-api` 面板路由 |
-| `lib/client.js` | **Client 半**:浮动进度面板(标准 `__ModuleLoader__` bundle,`fetch` 轮询) |
+| `lib/index.js` | **程序入口模块**:输入框内检测(斜杠命令注册、消息触发监听、systemPrompt 模型侧提示)、模型选择(父对话当前选择 / --model 覆盖 / 兜底)、题目检测(对话文本提取 / --from 本地文件)、识图能力探测、启动参数解析与校验、`/mcmp-api` 面板路由注册 |
+| `lib/pipeline.js` | **论文写作主循环模块**:8 步骤元数据与提示词构造(含质疑驱动)、子智能体调度、主循环编排(断点续跑、失败熔断、中止处理、兜底定稿)、运行状态与进度快照、中止/重置 |
+| `lib/client.js` | **显示界面模块**:浮动进度面板(标准 `__ModuleLoader__` bundle,`fetch` 轮询、显示与交互) |
 | `tests/smoke.mjs` | **冒烟测试**:伪造 Cordis ctx 驱动插件,验证启动/触发/断点续跑(含多轮)/中止/兜底/`--from`/识图探测等路径,`node tests/smoke.mjs`(不随 npm 包发布) |
 
 ## License
