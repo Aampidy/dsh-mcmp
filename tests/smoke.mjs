@@ -18,6 +18,7 @@ const PROBLEM_EVENT = { type: 'user/message', data: { content: [{ type: 'text', 
 function makeHarness({ events = [], toolsSchemas = [], subagentBehavior, fsEntries = [] } = {}) {
   const calls = { commands: [], routes: [], sections: [], listeners: [], appends: [] }
   const signals = [] // 每个子任务收到的 signal,用于验证中止链路
+  const requests = [] // 每次 subagents.start 收到的完整请求,用于验证 agentOptions 传递
   const session = {
     id: 's-test',
     header: { cwd: 'C:\\ws\\demo', origin: 'user' },
@@ -33,6 +34,7 @@ function makeHarness({ events = [], toolsSchemas = [], subagentBehavior, fsEntri
       children++
       const idx = children
       signals.push(req.signal)
+      requests.push(req)
       const r = typeof subagentBehavior === 'function'
         ? subagentBehavior(idx, req)
         : { text: 'ok ' + idx, stopReason: 'completed' }
@@ -68,7 +70,7 @@ function makeHarness({ events = [], toolsSchemas = [], subagentBehavior, fsEntri
   }
   apply(ctx)
   const byName = (n) => calls.commands.find((c) => c.name === n)
-  return { calls, session, agent, byName, getChildren: () => children, signals: () => signals }
+  return { calls, session, agent, byName, getChildren: () => children, signals: () => signals, requests: () => requests }
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -264,6 +266,34 @@ console.log('== T14 中止在兜底定稿阶段也能生效(控制器登记) =='
   check('T14 第二次中止能 abort 兜底定稿的 signal', sigs[1] && sigs[1].aborted === true, 'sig2.aborted=' + (sigs[1] && sigs[1].aborted))
   await sleep(250)
   check('T14 run-end 为 cancelled', lastRunEnd(h).data.stopReason === 'cancelled', JSON.stringify(lastRunEnd(h) && lastRunEnd(h).data))
+}
+
+console.log('== T17 --model 强制子任务模型路由 ==')
+{
+  // 完整形式
+  const h = makeHarness({ events: [PROBLEM_EVENT] })
+  const r = await run(h, '/loopbegin --model glm-vision/glm-4.7-Flash')
+  check('T17 启动成功(--model 提供商/模型)', r && r.kind === 'success', r && r.text)
+  await sleep(80)
+  const ao1 = h.requests()[0] && h.requests()[0].agentOptions
+  check('T17 子任务 agentOptions=glm-vision/glm-4.7-Flash', ao1 && ao1.provider === 'glm-vision' && ao1.model === 'glm-4.7-Flash', JSON.stringify(ao1))
+  // 分拆形式
+  const h2 = makeHarness({ events: [PROBLEM_EVENT] })
+  const r2 = await run(h2, '/loopbegin --provider glm-vision --model glm-4.7-Flash')
+  check('T17 启动成功(--provider + --model)', r2 && r2.kind === 'success')
+  await sleep(80)
+  const ao2 = h2.requests()[0] && h2.requests()[0].agentOptions
+  check('T17 子任务 agentOptions(分拆形式)', ao2 && ao2.provider === 'glm-vision' && ao2.model === 'glm-4.7-Flash', JSON.stringify(ao2))
+  // 缺提供商 → 报错
+  const h3 = makeHarness({ events: [PROBLEM_EVENT] })
+  const r3 = await run(h3, '/loopbegin --model glm-4.7-Flash')
+  check('T17 --model 缺提供商时提示格式', r3 && r3.kind === 'error' && /提供商\/模型/.test(r3.text), r3 && r3.text)
+  // 不传 --model → 不携带 agentOptions
+  const h4 = makeHarness({ events: [PROBLEM_EVENT] })
+  const r4 = await run(h4, '/loopbegin')
+  check('T17 不传 --model 时不强制', r4 && r4.kind === 'success')
+  await sleep(80)
+  check('T17 默认无 agentOptions', !h4.requests()[0].agentOptions, JSON.stringify(h4.requests()[0] && h4.requests()[0].agentOptions))
 }
 
 console.log(failures === 0 ? '\n全部通过 ✓' : '\n' + failures + ' 项失败 ✗')
