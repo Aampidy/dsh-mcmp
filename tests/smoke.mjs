@@ -15,7 +15,7 @@ function check(name, cond, extra) {
 
 const PROBLEM_EVENT = { type: 'user/message', data: { content: [{ type: 'text', text: '赛题:生产过程中的决策问题。某企业生产畅销电子产品,需要购买零配件并装配为成品,这是2024年全国大学生数学建模竞赛的B题,需要完成四个子问题的建模与求解。' }] } }
 
-function makeHarness({ events = [], toolsSchemas = [], subagentBehavior, fsEntries = [] } = {}) {
+function makeHarness({ events = [], toolsSchemas = [], subagentBehavior, fsEntries = [], defaultModel } = {}) {
   const calls = { commands: [], routes: [], sections: [], listeners: [], appends: [] }
   const signals = [] // 每个子任务收到的 signal,用于验证中止链路
   const requests = [] // 每次 subagents.start 收到的完整请求,用于验证 agentOptions 传递
@@ -62,6 +62,7 @@ function makeHarness({ events = [], toolsSchemas = [], subagentBehavior, fsEntri
           async listDir() { return fsEntries },
           async stat() { return { type: 'file' } },
         }
+        case 'agentDefaultModel': return defaultModel === undefined ? undefined : { currentSelection: () => defaultModel }
         case 'tools': return { schemas: () => toolsSchemas }
         default: return undefined
       }
@@ -288,12 +289,37 @@ console.log('== T17 --model 强制子任务模型路由 ==')
   const h3 = makeHarness({ events: [PROBLEM_EVENT] })
   const r3 = await run(h3, '/loopbegin --model glm-4.7-Flash')
   check('T17 --model 缺提供商时提示格式', r3 && r3.kind === 'error' && /提供商\/模型/.test(r3.text), r3 && r3.text)
-  // 不传 --model → 不携带 agentOptions
+  // 不传 --model 且无 agentDefaultModel → 兜底 deepseek-official/deepseek-v4-flash
   const h4 = makeHarness({ events: [PROBLEM_EVENT] })
   const r4 = await run(h4, '/loopbegin')
-  check('T17 不传 --model 时不强制', r4 && r4.kind === 'success')
+  check('T17 不传 --model 时启动成功', r4 && r4.kind === 'success')
   await sleep(80)
-  check('T17 默认无 agentOptions', !h4.requests()[0].agentOptions, JSON.stringify(h4.requests()[0] && h4.requests()[0].agentOptions))
+  const ao4 = h4.requests()[0] && h4.requests()[0].agentOptions
+  check('T17 无父模型选择时兜底 deepseek-v4-flash', ao4 && ao4.provider === 'deepseek-official' && ao4.model === 'deepseek-v4-flash', JSON.stringify(ao4))
+}
+
+console.log('== T18 子任务模型强制跟随父对话当前选择(右下角模型选择器) ==')
+{
+  // 父对话选择 glm-vision/glm-4.7-Flash → 不传 --model 子任务也用 glm
+  const h = makeHarness({ events: [PROBLEM_EVENT], defaultModel: { provider: 'glm-vision', model: 'glm-4.7-Flash' } })
+  const r = await run(h, '/loopbegin')
+  check('T18 启动成功', r && r.kind === 'success')
+  await sleep(80)
+  const ao = h.requests()[0] && h.requests()[0].agentOptions
+  check('T18 子任务 agentOptions=父对话模型(glm)', ao && ao.provider === 'glm-vision' && ao.model === 'glm-4.7-Flash', JSON.stringify(ao))
+  // 换父对话模型(模拟右下角切换到 deepseek-v4-flash)→ 子任务跟随
+  const h2 = makeHarness({ events: [PROBLEM_EVENT], defaultModel: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } })
+  const r2 = await run(h2, '/loopbegin')
+  await sleep(80)
+  const ao2 = h2.requests()[0] && h2.requests()[0].agentOptions
+  check('T18 切换后子任务跟随 deepseek-v4-flash', ao2 && ao2.provider === 'deepseek-official' && ao2.model === 'deepseek-v4-flash', JSON.stringify(ao2))
+  // --model 显式覆盖优先于父对话选择
+  const h3 = makeHarness({ events: [PROBLEM_EVENT], defaultModel: { provider: 'glm-vision', model: 'glm-4.7-Flash' } })
+  const r3 = await run(h3, '/loopbegin --model deepseek-official/deepseek-v4-flash')
+  check('T18 --model 覆盖父对话选择', r3 && r3.kind === 'success')
+  await sleep(80)
+  const ao3 = h3.requests()[0] && h3.requests()[0].agentOptions
+  check('T18 覆盖生效', ao3 && ao3.provider === 'deepseek-official' && ao3.model === 'deepseek-v4-flash', JSON.stringify(ao3))
 }
 
 console.log(failures === 0 ? '\n全部通过 ✓' : '\n' + failures + ' 项失败 ✗')

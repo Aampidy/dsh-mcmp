@@ -43,7 +43,7 @@ DeepSeek Harness **持久化 Cordis 插件**:面向全国大学生数学建模�
    - `/loopbegin` —— 默认 1 轮
    - `/loopbegin --round=3` —— 3 轮外循环(上限 10)
    - `/loopbegin --from 题目.txt` —— 从文件读取赛题(支持含空格/中文的文件名,如 `--from 2024 年高教社杯全国大学生数学建模竞赛题目.md`,也可用 `--from=文件` 形式)
-   - `/loopbegin --model glm-vision/glm-4.7-Flash` —— **强制所有流水线子任务使用指定模型路由**(也可用 `--provider 提供商 --model 模型` 分拆形式)。默认情况下子任务继承父会话**创建时固化**的模型选项,聊天窗口里切换模型不会传递给子任务——这就是"明明选了 GLM 却还在烧 DeepSeek"的原因;加 `--model` 即可真正指定
+   - `/loopbegin --model glm-vision/glm-4.7-Flash` —— 可选显式覆盖(也可用 `--provider 提供商 --model 模型` 分拆形式)。**默认不需要此参数**:流水线子任务的模型**强制跟随你在对话右下角选择的模型**(每次启动时读取当前选择);若无法读取(未安装默认模型服务),兜底使用 `deepseek-official/deepseek-v4-flash`(high 推理由 deepseek 提供商默认提供)
 3. **查看进度**:右下角浮动面板(百分比、步骤打点、日志、文件)+ 聊天区工作流卡片。
 
 辅助命令:`/loopstatus`(查看进度)、`/loopabort`(中止,已产出成果保留)、`/loopreset`(清空状态与断点续跑记录,下次 `/loopbegin` 从头全新开始;等价于面板「重置(全新开始)」按钮)。
