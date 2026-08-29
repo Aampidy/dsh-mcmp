@@ -11,8 +11,8 @@ DeepSeek Harness **持久化 Cordis 插件**:面向全国大学生数学建模�
 **无论流水线正常完成、出错还是被中止,最终都会生成一版完整、干净的 Markdown 论文(`Final_Paper.md`)。**
 
 > 完整设计见仓库内两份设计文档:
-> **`架构.md`**(v3.17,流程架构设计书:中控台、五阶段、评级/回滚/教训机制)与
-> **`提示词.md`**(v3.4,全部子智能体 Prompt 模板,主循环提示词由其逐段生成)。
+> **`ARCHITECTURE.md`**(v3.18,流程架构设计书:中控台、五阶段、评级/回滚/教训机制)与
+> **`PROMPTS.md`**(v3.5,全部子智能体 Prompt 模板,主循环提示词由其逐段生成)。
 
 ## 功能特性
 
@@ -115,7 +115,7 @@ pnpm dsh plugin --profile web remove dsh-mcmp
 
 ## 架构
 
-> 插件按职责拆分为三个模块,主循环按《架构.md》v3 实现。
+> 插件按职责拆分为三个模块,主循环按《ARCHITECTURE.md》v3 实现。
 
 ```
 用户消息(/loopbegin 开头)
@@ -129,9 +129,9 @@ pnpm dsh plugin --profile web remove dsh-mcmp
    └─ 启动解析与校验(--rollback-limit/--fresh/--model/--from)→ 委托主循环模块启动
    ▼
 论文写作主循环模块(lib/pipeline.js,createPipeline 实例)
-   ├─ 五阶段 × 22 子阶段:每个子阶段启动执行Agent(提示词由 提示词.md 2.1/2.2 + 三 生成)
-   ├─ 中控台·扫描验证模块:执行Agent上报 SUCCESS 后按 3.3 六维度扫描(提示词.md 4.1)
-   ├─ 中控台·评审决策模块:P0-P3 评级、根源定位、回滚裁定与 P3 定点修改(提示词.md 5.1)
+   ├─ 五阶段 × 22 子阶段:每个子阶段启动执行Agent(提示词由 PROMPTS.md 2.1/2.2 + 三 生成)
+   ├─ 中控台·扫描验证模块:执行Agent上报 SUCCESS 后按 3.3 六维度扫描(PROMPTS.md 4.1)
+   ├─ 中控台·评审决策模块:P0-P3 评级、根源定位、回滚裁定与 P3 定点修改(PROMPTS.md 5.1)
    ├─ 代码逻辑:回滚计数器、阶段级删除调度、强制锁定(FORCED_FINAL)、重跑、断点续跑
    ├─ 执行失败重试(3 次指数退避)+ 事务日志 transactions.log
    └─ 兜底定稿:不论成败补一版 Final_Paper.md
@@ -150,8 +150,8 @@ pnpm dsh plugin --profile web remove dsh-mcmp
 | --- | --- |
 | `package.json` | 插件包清单:`dsh.bundle` 补丁声明、`dsh.client` 声明、`exports` 入口(`.` → Host,`./client` → 面板 bundle) |
 | `cordis.patch.yml` | **bundle 补丁**:安装时自动注册插件行(`insert: mcmp`),无需手动编辑配置 |
-| `架构.md` | **流程架构设计书 v3.17**:中控台双模块、五阶段、评级/回滚/教训/索引机制与约束 |
-| `提示词.md` | **Prompt 设计 v3.4**:执行Agent/扫描验证模块/评审决策模块的全部提示词模板(主循环按此生成) |
+| `ARCHITECTURE.md` | **流程架构设计书 v3.18**:中控台双模块、五阶段、评级/回滚/教训/索引机制与约束 |
+| `PROMPTS.md` | **Prompt 设计 v3.5**:执行Agent/扫描验证模块/评审决策模块的全部提示词模板(主循环按此生成) |
 | `lib/index.js` | **程序入口模块**:输入框内检测、模型选择、题目检测、识图能力探测、启动参数解析与校验、`/mcmp-api` 面板路由注册 |
 | `lib/pipeline.js` | **论文写作主循环模块**:五阶段元数据与提示词构造、中控台扫描/评审调度、回滚与锁定、断点续跑、运行状态与进度快照、中止/重置 |
 | `lib/client.js` | **显示界面模块**:浮动进度面板(标准 `__ModuleLoader__` bundle,`fetch` 轮询、显示与交互) |
