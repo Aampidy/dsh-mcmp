@@ -1,6 +1,6 @@
 {
   "name": "dsh-mcmp",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "DeepSeek Harness 插件:数学建模竞赛自动化论文撰写系统 v3(中控台双重质疑 + 五阶段流水线:扫描验证/评审决策、P0-P3 评级与阶段级回滚、教训持久化、索引导航、兜底定稿 Final_Paper.md、断点续跑、进度面板)",
   "type": "module",
   "main": "lib/index.js",

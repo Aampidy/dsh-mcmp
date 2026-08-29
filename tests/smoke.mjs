@@ -315,11 +315,11 @@ console.log('== T13 --from 路径解析(后面带其他参数) ==')
   const h = makeHarness({
     subagentBehavior: (i, req) => { if (i === 1) firstPrompt = req.prompt[0].text; return allPass(i, req) },
   })
-  const r = await run(h, '/loopbegin --from C:\\problems\\题目 b.md --round=2')
-  check('T13 启动成功(路径含空格且后跟 --round)', r && r.kind === 'success')
+  const r = await run(h, '/loopbegin --from C:\\problems\\题目 b.md --rollback-limit=5')
+  check('T13 启动成功(路径含空格且后跟 --rollback-limit)', r && r.kind === 'success')
   await sleep(80)
   const fileLine = firstPrompt.match(/赛题原文文件: ([^\n]+)/)
-  check('T13 赛题文件路径未被 --round 污染', fileLine && fileLine[1].indexOf('--round') === -1 && fileLine[1].indexOf('题目 b.md') >= 0, fileLine && fileLine[1])
+  check('T13 赛题文件路径未被 --rollback-limit 污染', fileLine && fileLine[1].indexOf('--rollback-limit') === -1 && fileLine[1].indexOf('题目 b.md') >= 0, fileLine && fileLine[1])
 }
 
 console.log('== T14 识图能力探测与五阶段提示词内容 ==')
@@ -423,6 +423,36 @@ console.log('== T19 旧报告残留(agent_id 不匹配)→ 视为缺失,回退�
   check('T19 仅 0.1 走评审(1 次)', h.requests().filter((r) => isReview(r)).length === 1, 'reviews=' + h.requests().filter((r) => isReview(r)).length)
   check('T19 其余 21 个子阶段走扫描', h.requests().filter((r) => isScan(r)).length === 21, 'scans=' + h.requests().filter((r) => isScan(r)).length)
   check('T19 run-end completed', lastRunEnd(h).data.stopReason === 'completed')
+}
+
+console.log('== T20 --rollback-limit 参数化:上限=2 时锁定更快 + 参数校验 ==')
+{
+  // 上限 2:1.1 两次回滚后即 FORCED_FINAL;随后 1.2 再触发回滚请求 → 降级 P3 不再计数
+  let reviews = 0
+  const h = makeHarness({
+    events: [PROBLEM_EVENT],
+    subagentBehavior: (i, req) => {
+      if (isExec(req) && (execSub(req) === '1.1' || execSub(req) === '1.2')) return { text: '上报状态: HAS_ISSUES\n持续问题', stopReason: 'completed' }
+      if (isReview(req)) { reviews++; return { text: '决策: ROLLBACK\n评级: P1\n回滚目标: 阶段一', stopReason: 'completed' } }
+      return allPass(i, req)
+    },
+  })
+  const r = await run(h, '/loopbegin --rollback-limit=2')
+  check('T20 启动成功', r && r.kind === 'success')
+  await sleep(200)
+  check('T20 评审 3 次(2 回滚 + 1 锁定后降级)', reviews === 3, 'reviews=' + reviews)
+  check('T20 回滚事件 2 次', countType(h, 'tool-workflow/rollback') === 2, 'rollback=' + countType(h, 'tool-workflow/rollback'))
+  let body = null
+  h.calls.routes[0].handler({ method: 'GET', url: '/mcmp-api/state' }, { writeHead() {}, end(b) { body = JSON.parse(b) } })
+  check('T20 快照:rollbackLimit=2 且 forcedFinal=true', body && body.supervisor.rollbackLimit === 2 && body.supervisor.forcedFinal === true && body.supervisor.rollbackCount === 2, body && JSON.stringify(body.supervisor))
+  check('T20 run-end completed', lastRunEnd(h).data.stopReason === 'completed')
+  // 参数校验:越界值报错
+  const h2 = makeHarness({ events: [PROBLEM_EVENT], subagentBehavior: allPass })
+  const r2 = await run(h2, '/loopbegin --rollback-limit=0')
+  check('T20 --rollback-limit=0 被拒绝', r2 && r2.kind === 'error' && /1~99/.test(r2.text), r2 && r2.text)
+  const h3 = makeHarness({ events: [PROBLEM_EVENT], subagentBehavior: allPass })
+  const r3 = await run(h3, '/loopbegin --rollback-limit=100')
+  check('T20 --rollback-limit=100 被拒绝', r3 && r3.kind === 'error' && /1~99/.test(r3.text), r3 && r3.text)
 }
 
 console.log(failures === 0 ? '\n全部通过 ✓' : '\n' + failures + ' 项失败 ✗')
