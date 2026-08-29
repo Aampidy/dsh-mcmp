@@ -1,7 +1,8 @@
 /**
- * dsh-mcmp 冒烟测试:用伪造的 Cordis ctx 驱动 apply(),
- * 验证启动、触发、断点续跑(含多轮)、中止(含兜底阶段)、重置、--from 补全、
- * 迭代重试、识图探测、API 路由等路径。
+ * dsh-mcmp 冒烟测试(v3 架构:五阶段 + 中控台双模块):
+ * 用伪造的 Cordis ctx 驱动 apply(),验证启动、执行→扫描/评审路由、回滚与强制锁定、
+ * P3 定点修改、执行失败重试与暂停、断点续跑、中止(含兜底阶段)、重置、_report.yaml
+ * 文件路由、--from 补全、识图探测、--model 路由、API 路由等路径。
  * 运行:node tests/smoke.mjs
  */
 import { apply } from '../lib/index.js'
@@ -15,8 +16,8 @@ function check(name, cond, extra) {
 
 const PROBLEM_EVENT = { type: 'user/message', data: { content: [{ type: 'text', text: '赛题:生产过程中的决策问题。某企业生产畅销电子产品,需要购买零配件并装配为成品,这是2024年全国大学生数学建模竞赛的B题,需要完成四个子问题的建模与求解。' }] } }
 
-function makeHarness({ events = [], toolsSchemas = [], subagentBehavior, fsEntries = [], defaultModel } = {}) {
-  const calls = { commands: [], routes: [], sections: [], listeners: [], appends: [] }
+function makeHarness({ events = [], toolsSchemas = [], subagentBehavior, fsEntries = [], reportContent = null, defaultModel, retryMs = [1, 1, 1] } = {}) {
+  const calls = { commands: [], routes: [], sections: [], listeners: [], appends: [], fsWrites: [] }
   const signals = [] // 每个子任务收到的 signal,用于验证中止链路
   const requests = [] // 每次 subagents.start 收到的完整请求,用于验证 agentOptions 传递
   const session = {
@@ -61,9 +62,18 @@ function makeHarness({ events = [], toolsSchemas = [], subagentBehavior, fsEntri
           async resolve(p) { return { path: String(p) } },
           async listDir() { return fsEntries },
           async stat() { return { type: 'file' } },
+          async readText(t) {
+            if (String(t.path).includes('_report.yaml') && reportContent !== null) return reportContent
+            throw new Error('ENOENT')
+          },
+          async writeText(t, content) {
+            calls.fsWrites.push({ path: String(t.path), content })
+            return { version: 'v1' }
+          },
         }
         case 'agentDefaultModel': return defaultModel === undefined ? undefined : { currentSelection: () => defaultModel }
         case 'tools': return { schemas: () => toolsSchemas }
+        case 'mcmpRetryBackoffMs': return retryMs
         default: return undefined
       }
     },
@@ -76,250 +86,343 @@ function makeHarness({ events = [], toolsSchemas = [], subagentBehavior, fsEntri
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const run = (h, rawInput) => h.byName('loopbegin').handler({ agent: h.agent, rawInput })
+const lastRunEnd = (h) => h.calls.appends.filter((a) => a.type === 'tool-workflow/run-end').pop()
+const countType = (h, t) => h.calls.appends.filter((a) => a.type === t).length
 
-/** 生成一个工具工作流运行的事件:从 seqStart 起 count 个迭代,前 donePrefix 个完成 */
-function makeRun(seqStart, count, donePrefix) {
-  const evs = [{ type: 'tool-workflow/run-start', data: { runId: 'r' + seqStart, name: '数学建模论文流水线v2' } }]
-  for (let k = 0; k < count; k++) {
-    const seq = seqStart + k
-    evs.push({ type: 'tool-workflow/agent-start', data: { runId: 'r' + seqStart, seq } })
-    if (k < donePrefix) evs.push({ type: 'tool-workflow/agent-end', data: { runId: 'r' + seqStart, seq, outcome: 'completed' } })
-  }
-  return evs
+// 子任务标签分类:执行Agent(阶段X·y.z)/ 扫描验证 / 评审决策 / 兜底定稿
+const isScan = (req) => String(req.label).startsWith('中控台·扫描验证')
+const isReview = (req) => String(req.label).startsWith('中控台·评审决策')
+const isFinal = (req) => String(req.label).startsWith('兜底')
+const isExec = (req) => !isScan(req) && !isReview(req) && !isFinal(req)
+const execSub = (req) => (String(req.label).match(/·(\d+\.\d+) /) || [])[1] || ''
+
+// 默认全通过行为:执行 SUCCESS → 扫描 PASS
+const allPass = (i, req) => {
+  if (isExec(req)) return { text: '上报状态: SUCCESS\n工作完成', stopReason: 'completed' }
+  if (isScan(req)) return { text: '扫描结论: PASS', stopReason: 'completed' }
+  if (isReview(req)) return { text: '决策: NO_ACTION\n评级: P3', stopReason: 'completed' }
+  if (isFinal(req)) return { text: '兜底完成', stopReason: 'completed' }
+  return { text: 'x', stopReason: 'completed' }
 }
 
-const lastRunEnd = (h) => h.calls.appends.filter((a) => a.type === 'tool-workflow/run-end').pop()
-
-console.log('== T1 全新运行:19 个迭代全部完成,不触发兜底 ==')
+console.log('== T1 全新运行:22 个子阶段全部 SUCCESS+PASS,不触发评审/兜底 ==')
 {
-  const h = makeHarness({ events: [PROBLEM_EVENT] })
+  const h = makeHarness({ events: [PROBLEM_EVENT], subagentBehavior: allPass })
   const r = await run(h, '/loopbegin')
   check('T1 启动成功', r && r.kind === 'success')
-  await sleep(60)
-  check('T1 子智能体数=19(不触发兜底)', h.getChildren() === 19, 'children=' + h.getChildren())
-  const t = h.calls.appends.map((a) => a.type)
-  const n = (x) => t.filter((v) => v === x).length
-  check('T1 卡片事件完整(1 run-start + 19 start + 19 end + 1 run-end)', n('tool-workflow/run-start') === 1 && n('tool-workflow/agent-start') === 19 && n('tool-workflow/agent-end') === 19 && n('tool-workflow/run-end') === 1, 'start=' + n('tool-workflow/agent-start') + ' end=' + n('tool-workflow/agent-end'))
-  check('T1 run-end 为 completed', lastRunEnd(h).data.stopReason === 'completed')
-}
-
-console.log('== T2 最后一步(S8)失败 → 触发兜底定稿 ==')
-{
-  const h = makeHarness({ events: [PROBLEM_EVENT], subagentBehavior: (i) => ({ text: 'x', stopReason: i === 19 ? 'failed' : 'completed' }) })
-  const r = await run(h, '/loopbegin')
-  check('T2 启动成功', r && r.kind === 'success')
   await sleep(80)
-  check('T2 子智能体数=20(19 + 兜底)', h.getChildren() === 20, 'children=' + h.getChildren())
-  check('T2 兜底成功后 run-end 为 completed', lastRunEnd(h).data.stopReason === 'completed')
+  check('T1 子智能体数=44(22 执行 + 22 扫描)', h.getChildren() === 44, 'children=' + h.getChildren())
+  check('T1 卡片事件(1 run-start + 44 start + 44 end + 22 substage-done + 1 run-end)',
+    countType(h, 'tool-workflow/run-start') === 1 && countType(h, 'tool-workflow/agent-start') === 44
+    && countType(h, 'tool-workflow/agent-end') === 44 && countType(h, 'tool-workflow/substage-done') === 22
+    && countType(h, 'tool-workflow/run-end') === 1,
+    'start=' + countType(h, 'tool-workflow/agent-start') + ' done=' + countType(h, 'tool-workflow/substage-done'))
+  check('T1 run-end 为 completed', lastRunEnd(h).data.stopReason === 'completed')
+  let body = null
+  h.calls.routes[0].handler({ method: 'GET', url: '/mcmp-api/state' }, { writeHead() {}, end(b) { body = JSON.parse(b) } })
+  check('T1 快照:stages=5 且全部完成', body && Array.isArray(body.stages) && body.stages.length === 5 && body.stages[4].done === 3 && body.done === 22 && body.total === 22, body && JSON.stringify({ done: body.done, total: body.total, s4: body.stages && body.stages[4].done }))
+  check('T1 快照:supervisor 回滚 0/10 未锁定', body && body.supervisor && body.supervisor.rollbackCount === 0 && body.supervisor.forcedFinal === false)
 }
 
-console.log('== T3 前 3 个迭代连续失败 → error 终止 + 兜底 ==')
+console.log('== T2 执行失败重试(架构 3.8):失败1次后成功 ==')
 {
-  const h = makeHarness({ events: [PROBLEM_EVENT], subagentBehavior: (i) => ({ text: 'x', stopReason: i <= 3 ? 'failed' : 'completed' }) })
-  const r = await run(h, '/loopbegin')
-  check('T3 启动成功', r && r.kind === 'success')
+  let execFails = 0
+  const h = makeHarness({
+    events: [PROBLEM_EVENT],
+    subagentBehavior: (i, req) => {
+      if (isExec(req) && execSub(req) === '0.1' && execFails++ === 0) return { text: 'x', stopReason: 'failed' }
+      return allPass(i, req)
+    },
+  })
+  await run(h, '/loopbegin')
   await sleep(120)
-  check('T3 子智能体数=4(3 失败 + 兜底)', h.getChildren() === 4, 'children=' + h.getChildren())
-  check('T3 run-end 为 error', lastRunEnd(h).data.stopReason === 'error')
+  check('T2 重试后完成(children=44+1)', h.getChildren() === 45, 'children=' + h.getChildren())
+  check('T2 run-end completed', lastRunEnd(h).data.stopReason === 'completed')
 }
 
-console.log('== T4 运行中中止 → cancelled + 兜底 ==')
+console.log('== T3 执行失败 4 次(含3重试)→ 暂停 + transactions.log + 兜底 ==')
 {
-  const h = makeHarness({ events: [PROBLEM_EVENT] })
-  const r = await run(h, '/loopbegin')
-  check('T4 启动成功', r && r.kind === 'success')
+  const h = makeHarness({
+    events: [PROBLEM_EVENT],
+    subagentBehavior: (i, req) => {
+      if (isExec(req) && execSub(req) === '0.1') return { text: 'x', stopReason: 'failed' }
+      return allPass(i, req)
+    },
+  })
+  await run(h, '/loopbegin')
+  await sleep(150)
+  check('T3 子智能体数=5(0.1 执行4次 + 兜底1次)', h.getChildren() === 5, 'children=' + h.getChildren())
+  check('T3 run-end 为 error(暂停人工介入)', lastRunEnd(h).data.stopReason === 'error', JSON.stringify(lastRunEnd(h).data))
+  check('T3 失败写入 transactions.log', h.calls.fsWrites.some((w) => w.path.includes('transactions.log')), JSON.stringify(h.calls.fsWrites.map((w) => w.path)))
+}
+
+console.log('== T4 执行Agent上报 HAS_ISSUES → 评审决策 ROLLBACK → 阶段级回滚重跑 ==')
+{
+  let t2_3 = 0
+  const h = makeHarness({
+    events: [PROBLEM_EVENT],
+    subagentBehavior: (i, req) => {
+      if (isExec(req) && execSub(req) === '2.3') {
+        t2_3++
+        if (t2_3 === 1) return { text: '上报状态: HAS_ISSUES\n问题:求解结果为负', stopReason: 'completed' }
+      }
+      if (isReview(req)) return { text: '决策: ROLLBACK\n评级: P2\n回滚目标: 阶段二', stopReason: 'completed' }
+      return allPass(i, req)
+    },
+  })
+  await run(h, '/loopbegin')
+  await sleep(150)
+  check('T4 回滚事件已记录(1次)', countType(h, 'tool-workflow/rollback') === 1, 'rollback=' + countType(h, 'tool-workflow/rollback'))
+  check('T4 回滚后重跑:2.1 执行两次', h.requests().filter((r) => isExec(r) && execSub(r) === '2.1').length === 2, '2.1次数=' + h.requests().filter((r) => isExec(r) && execSub(r) === '2.1').length)
+  check('T4 最终 run-end completed', lastRunEnd(h).data.stopReason === 'completed')
+  let body = null
+  h.calls.routes[0].handler({ method: 'GET', url: '/mcmp-api/state' }, { writeHead() {}, end(b) { body = JSON.parse(b) } })
+  check('T4 快照:supervisor.rollbackCount=1 且 issues.P2=1', body && body.supervisor.rollbackCount === 1 && body.supervisor.issues.P2 === 1, body && JSON.stringify(body.supervisor))
+}
+
+console.log('== T5 评审决策 P3 → 精确定点修改,继续推进(不回滚) ==')
+{
+  const h = makeHarness({
+    events: [PROBLEM_EVENT],
+    subagentBehavior: (i, req) => {
+      if (isExec(req) && execSub(req) === '1.1') return { text: '上报状态: HAS_ISSUES\n小问题', stopReason: 'completed' }
+      if (isReview(req)) return { text: '决策: P3_FIX\n评级: P3\n{"p3_fix":{"fixed":true}}', stopReason: 'completed' }
+      return allPass(i, req)
+    },
+  })
+  await run(h, '/loopbegin')
+  await sleep(120)
+  check('T5 无回滚事件', countType(h, 'tool-workflow/rollback') === 0)
+  check('T5 run-end completed', lastRunEnd(h).data.stopReason === 'completed')
+  let body = null
+  h.calls.routes[0].handler({ method: 'GET', url: '/mcmp-api/state' }, { writeHead() {}, end(b) { body = JSON.parse(b) } })
+  check('T5 快照:issues.P3=1', body && body.supervisor.issues.P3 === 1, body && JSON.stringify(body.supervisor && body.supervisor.issues))
+}
+
+console.log('== T6 扫描验证发现问题 → 转交评审决策 P3 → 继续 ==')
+{
+  const h = makeHarness({
+    events: [PROBLEM_EVENT],
+    subagentBehavior: (i, req) => {
+      if (isExec(req) && execSub(req) === '2.2') return { text: '上报状态: SUCCESS\n完成', stopReason: 'completed' }
+      if (isScan(req) && req.label.includes('2.2')) return { text: '扫描结论: HAS_ISSUES\n{"issues_found":[{"rating":"P3"}]}', stopReason: 'completed' }
+      if (isReview(req)) return { text: '决策: P3_FIX\n评级: P3', stopReason: 'completed' }
+      return allPass(i, req)
+    },
+  })
+  await run(h, '/loopbegin')
+  await sleep(120)
+  check('T6 评审决策被触发(扫描转交)', h.requests().some((r) => isReview(r)), 'review=' + h.requests().filter((r) => isReview(r)).length)
+  check('T6 run-end completed', lastRunEnd(h).data.stopReason === 'completed')
+}
+
+console.log('== T7 同一阶段回滚 10 次 → FORCED_FINAL 强制锁定;锁定后再回滚 → 降级 P3 继续推进 ==')
+{
+  // 1.1 每次上报 HAS_ISSUES,评审每次都裁定回滚到阶段一;第10次触发锁定;
+  // 锁定后 1.2 再次触发回滚请求(目标仍是阶段一)→ 应降级为 P3 处理,计数器不再增长
+  let reviews = 0
+  const h = makeHarness({
+    events: [PROBLEM_EVENT],
+    subagentBehavior: (i, req) => {
+      if (isExec(req) && (execSub(req) === '1.1' || execSub(req) === '1.2')) return { text: '上报状态: HAS_ISSUES\n持续问题', stopReason: 'completed' }
+      if (isReview(req)) { reviews++; return { text: '决策: ROLLBACK\n评级: P1\n回滚目标: 阶段一', stopReason: 'completed' } }
+      return allPass(i, req)
+    },
+  })
+  await run(h, '/loopbegin')
+  await sleep(250)
+  check('T7 评审决策执行 11 次(10 次回滚 + 1 次锁定后降级)', reviews === 11, 'reviews=' + reviews)
+  check('T7 回滚事件 10 次(锁定后不再计数)', countType(h, 'tool-workflow/rollback') === 10, 'rollback=' + countType(h, 'tool-workflow/rollback'))
+  check('T7 锁定后继续推进并完成', lastRunEnd(h).data.stopReason === 'completed', JSON.stringify(lastRunEnd(h).data))
+  let body = null
+  h.calls.routes[0].handler({ method: 'GET', url: '/mcmp-api/state' }, { writeHead() {}, end(b) { body = JSON.parse(b) } })
+  check('T7 快照:supervisor.forcedFinal=true 且 rollbackCount=10(不超限)', body && body.supervisor.forcedFinal === true && body.supervisor.rollbackCount === 10, body && JSON.stringify(body.supervisor))
+  check('T7 锁定写入 transactions.log', h.calls.fsWrites.some((w) => w.content.includes('FORCED_FINAL')), 'writes=' + h.calls.fsWrites.length)
+}
+
+console.log('== T8 运行中中止 → cancelled + 兜底定稿 ==')
+{
+  const h = makeHarness({ events: [PROBLEM_EVENT], subagentBehavior: allPass })
+  await run(h, '/loopbegin')
   const route = h.calls.routes[0].handler
   route({ method: 'POST', url: '/mcmp-api/abort' }, { writeHead() {}, end() {} })
   await sleep(80)
-  check('T4 run-end 为 cancelled', lastRunEnd(h).data.stopReason === 'cancelled', JSON.stringify(lastRunEnd(h) && lastRunEnd(h).data))
-  check('T4 兜底执行(至少 2 个子任务)', h.getChildren() >= 2, 'children=' + h.getChildren())
+  check('T8 run-end 为 cancelled', lastRunEnd(h).data.stopReason === 'cancelled', JSON.stringify(lastRunEnd(h).data))
+  check('T8 兜底定稿执行(至少 2 个子任务)', h.getChildren() >= 2, 'children=' + h.getChildren())
 }
 
-console.log('== T5 多轮断点续跑计数 ==')
+console.log('== T9 _report.yaml 文件路由(文件优先于回复) ==')
 {
-  const eventsA = [PROBLEM_EVENT, ...makeRun(1, 19, 19), ...makeRun(20, 19, 19)]
-  const hA = makeHarness({ events: eventsA })
-  const rA = await run(hA, '/loopbegin --round=2')
-  check('T5A 两轮完成 → 提示无需重复(38)', rA && rA.kind === 'error' && /已完成 38/.test(rA.text), rA && rA.text)
-  const eventsB = [PROBLEM_EVENT, ...makeRun(1, 19, 19), ...makeRun(20, 19, 5)]
-  const hB = makeHarness({ events: eventsB })
-  const rB = await run(hB, '/loopbegin --round=2')
-  check('T5B 第二轮部分完成 → 断点续跑 24→25', rB && rB.kind === 'success' && /跳过此前完成的 24 次迭代/.test(rB.text), rB && rB.text)
-  if (rB && rB.kind === 'success') {
-    await sleep(80)
-    check('T5B 实际子任务数=38-24=14', hB.getChildren() === 14, 'children=' + hB.getChildren())
-  }
-  const eventsC = [PROBLEM_EVENT, ...makeRun(1, 19, 7)]
-  const hC = makeHarness({ events: eventsC })
-  const rC = await run(hC, '/loopbegin')
-  check('T5C 首轮部分完成 → 断点续跑 7→8', rC && rC.kind === 'success' && /跳过此前完成的 7 次迭代/.test(rC.text), rC && rC.text)
+  const h = makeHarness({
+    events: [PROBLEM_EVENT],
+    reportContent: 'status: "NEEDS_REVIEW"\nissues:\n  - problem: "不确定"\n',
+    subagentBehavior: (i, req) => {
+      if (isExec(req)) return { text: '上报状态: SUCCESS\n回复说成功', stopReason: 'completed' }
+      if (isReview(req)) return { text: '决策: NO_ACTION\n评级: P3', stopReason: 'completed' }
+      return allPass(i, req)
+    },
+  })
+  await run(h, '/loopbegin')
+  await sleep(120)
+  check('T9 文件 status=NEEDS_REVIEW → 走评审(而非扫描)', h.requests().filter((r) => isReview(r)).length === 22, 'reviews=' + h.requests().filter((r) => isReview(r)).length)
+  check('T9 run-end completed', lastRunEnd(h).data.stopReason === 'completed')
 }
 
-console.log('== T6 --from 路径解析(后面带其他参数) ==')
+console.log('== T10 断点续跑:已完成 5 个子阶段 → 从第 6 个继续 ==')
+{
+  const doneEvents = ['0.1', '0.2', '0.3', '0.4', '1.1'].map((k) => ({ type: 'tool-workflow/substage-done', data: { runId: 'r0', subKey: k, pass: 1 } }))
+  const h = makeHarness({
+    events: [PROBLEM_EVENT, { type: 'tool-workflow/run-start', data: { runId: 'r0', name: '数学建模竞赛自动化论文撰写系统v3' } }, ...doneEvents],
+    subagentBehavior: allPass,
+  })
+  const r = await run(h, '/loopbegin')
+  check('T10 启动提示含跳过 5 个子阶段', r && r.kind === 'success' && /跳过此前完成的 5 个子阶段/.test(r.text), r && r.text.split('\n')[1])
+  await sleep(120)
+  check('T10 实际子任务数=(22-5)*2=34', h.getChildren() === 34, 'children=' + h.getChildren())
+}
+
+console.log('== T11 完成后再启动 → 提示无需重复;重置后 → 全新开始 ==')
+{
+  const h = makeHarness({ events: [PROBLEM_EVENT], subagentBehavior: allPass })
+  await run(h, '/loopbegin')
+  await sleep(120)
+  const r2 = await run(h, '/loopbegin')
+  check('T11 不重置时提示无需重复(22)', r2 && r2.kind === 'error' && /已完成 22/.test(r2.text), r2 && r2.text)
+  let body = null
+  h.calls.routes[0].handler({ method: 'POST', url: '/mcmp-api/reset' }, { writeHead() {}, end(b) { body = JSON.parse(b) } })
+  check('T11 POST /reset 成功', body && body.ok === true)
+  check('T11 会话追加了重置标记', h.calls.appends.some((a) => a.type === 'tool-workflow/mcmp-reset'))
+  const r3 = await run(h, '/loopbegin')
+  check('T11 重置后为全新运行', r3 && r3.kind === 'success' && /全新运行/.test(r3.text) && !/断点续跑:已跳过/.test(r3.text), r3 && r3.text.split('\n')[1])
+  await sleep(120)
+  check('T11 重置后再跑 44 个子任务', h.getChildren() === 88, 'children=' + h.getChildren())
+}
+
+console.log('== T12 触发器:以 /loopbegin 开头的用户消息自动启动 ==')
+{
+  const h = makeHarness({ events: [PROBLEM_EVENT], subagentBehavior: allPass })
+  const listener = h.calls.listeners.find((l) => l.name === 'session/event')
+  const fakeSession = { id: 's-x', header: { cwd: 'C:\\ws\\demo', origin: 'user' }, events: [PROBLEM_EVENT] }
+  const fakeEvent = { type: 'user/message', data: { content: [{ type: 'text', text: '/loopbegin\n' + PROBLEM_EVENT.data.content[0].text }] } }
+  listener.fn(fakeSession, fakeEvent)
+  await sleep(120)
+  check('T12 触发器自动启动并执行 44 个子任务', h.getChildren() === 44, 'children=' + h.getChildren())
+}
+
+console.log('== T13 --from 路径解析(后面带其他参数) ==')
 {
   let firstPrompt = ''
   const h = makeHarness({
-    subagentBehavior: (i, req) => { if (i === 1) firstPrompt = req.prompt[0].text; return { text: 'x', stopReason: 'completed' } },
+    subagentBehavior: (i, req) => { if (i === 1) firstPrompt = req.prompt[0].text; return allPass(i, req) },
   })
   const r = await run(h, '/loopbegin --from C:\\problems\\题目 b.md --round=2')
-  check('T6 启动成功(路径含空格且后跟 --round)', r && r.kind === 'success')
+  check('T13 启动成功(路径含空格且后跟 --round)', r && r.kind === 'success')
   await sleep(80)
-  const fileLine = firstPrompt.match(/【赛题原文文件】([^\n]+)/)
-  check('T6 赛题文件路径未被 --round 污染', fileLine && fileLine[1].indexOf('--round') === -1 && fileLine[1].indexOf('题目 b.md') >= 0, fileLine && fileLine[1])
+  const fileLine = firstPrompt.match(/赛题原文文件: ([^\n]+)/)
+  check('T13 赛题文件路径未被 --round 污染', fileLine && fileLine[1].indexOf('--round') === -1 && fileLine[1].indexOf('题目 b.md') >= 0, fileLine && fileLine[1])
 }
 
-console.log('== T7 识图能力探测(S5 提示携带探测结果) ==')
+console.log('== T14 识图能力探测与五阶段提示词内容 ==')
 {
-  let s5Prompt = ''
+  let s13Prompt = ''
   const h = makeHarness({
     events: [PROBLEM_EVENT],
     toolsSchemas: [{ name: 'vision_describe' }, { name: 'read_image' }],
-    subagentBehavior: (i, req) => { if (i === 12) s5Prompt = req.prompt[0].text; return { text: i === 12 ? '视觉能力:可用(工具:vision_describe)' : 'x', stopReason: 'completed' } },
+    subagentBehavior: (i, req) => { if (isExec(req) && execSub(req) === '1.3' && !s13Prompt) s13Prompt = req.prompt[0].text; return allPass(i, req) },
   })
   const r = await run(h, '/loopbegin')
-  check('T7 启动成功', r && r.kind === 'success')
+  check('T14 启动成功', r && r.kind === 'success')
   await sleep(80)
-  check('T7 S5 提示包含宿主侧探测到的工具', s5Prompt.indexOf('vision_describe') >= 0 && s5Prompt.indexOf('宿主侧探测') >= 0, (s5Prompt.match(/【流水线位置】[^\n]*/) || [''])[0])
+  check('T14 1.3 执行提示词含统一质疑标准六维度', s13Prompt.indexOf('教训对照') >= 0 && s13Prompt.indexOf('视觉合理性') >= 0)
+  check('T14 1.3 执行提示词含教训/索引必读', s13Prompt.indexOf('ROLLBACK_LESSONS.yaml') >= 0 && s13Prompt.indexOf('FILE_INDEX.yaml') >= 0)
+  check('T14 1.3 执行提示词含宿主侧探测的识图工具', s13Prompt.indexOf('vision_describe') >= 0)
+  check('T14 1.3 执行提示词要求必须调用视觉模块', s13Prompt.indexOf('【必须】按3.3两阶段流程调用视觉模块审阅') >= 0)
+  check('T14 执行提示词要求上报 _report.yaml 与首行上报状态', s13Prompt.indexOf('_report.yaml') >= 0 && s13Prompt.indexOf('上报状态: SUCCESS|HAS_ISSUES|NEEDS_REVIEW') >= 0)
 }
 
-console.log('== T8 API 路由 ==')
+console.log('== T15 API 路由与命令 ==')
 {
   const h = makeHarness({})
   const route = h.calls.routes[0].handler
   let status = 0, body = null
   route({ method: 'GET', url: '/mcmp-api/state' }, { writeHead(c) { status = c }, end(b) { body = JSON.parse(b) } })
-  check('T8 GET /state 返回 200 + 状态字段', status === 200 && body && body.status === 'idle', 'status=' + status)
+  check('T15 GET /state 返回 200 + 空闲状态', status === 200 && body && body.status === 'idle', 'status=' + status)
   route({ method: 'POST', url: '/mcmp-api/reset' }, { writeHead(c) { status = c }, end(b) { body = JSON.parse(b) } })
-  check('T8 POST /reset 空闲时返回 ok', status === 200 && body && body.ok === true, JSON.stringify(body))
+  check('T15 POST /reset 空闲时返回 ok', status === 200 && body && body.ok === true, JSON.stringify(body))
+  const rAbort = h.byName('loopabort').handler()
+  check('T15 loopabort 无任务时提示', rAbort && rAbort.kind === 'error' && /没有运行中的流水线/.test(rAbort.text))
+  const rReset = h.byName('loopreset').handler()
+  check('T15 /loopreset 空闲可重置', rReset && rReset.kind === 'success' && /从头全新开始/.test(rReset.text), rReset && rReset.text)
 }
 
-console.log('== T9 loopabort 无运行中任务 ==')
+console.log('== T16 --model 强制子任务模型路由 ==')
 {
-  const h = makeHarness({})
-  const r = h.byName('loopabort').handler()
-  check('T9 返回错误提示', r && r.kind === 'error' && /没有运行中的流水线/.test(r.text))
-}
-
-console.log('== T10 触发器:以 /loopbegin 开头的用户消息自动启动 ==')
-{
-  const h = makeHarness({ events: [PROBLEM_EVENT] })
-  const listener = h.calls.listeners.find((l) => l.name === 'session/event')
-  const fakeSession = { id: 's-x', header: { cwd: 'C:\\ws\\demo', origin: 'user' }, events: [PROBLEM_EVENT] }
-  const fakeEvent = { type: 'user/message', data: { content: [{ type: 'text', text: '/loopbegin\n' + PROBLEM_EVENT.data.content[0].text }] } }
-  listener.fn(fakeSession, fakeEvent)
+  const h = makeHarness({ events: [PROBLEM_EVENT], subagentBehavior: allPass })
+  const r = await run(h, '/loopbegin --model glm-vision/glm-4.7-Flash')
+  check('T16 启动成功', r && r.kind === 'success')
   await sleep(80)
-  check('T10 触发器自动启动并执行 19 个迭代', h.getChildren() === 19, 'children=' + h.getChildren())
-}
-
-console.log('== T11 重置记录:完成后重置 → 下次全新开始 ==')
-{
-  const h = makeHarness({ events: [PROBLEM_EVENT] })
-  const r1 = await run(h, '/loopbegin')
-  check('T11 首次运行启动成功', r1 && r1.kind === 'success')
+  const ao1 = h.requests()[0] && h.requests()[0].agentOptions
+  check('T16 子任务 agentOptions=glm-vision/glm-4.7-Flash', ao1 && ao1.provider === 'glm-vision' && ao1.model === 'glm-4.7-Flash', JSON.stringify(ao1))
+  const h4 = makeHarness({ events: [PROBLEM_EVENT], subagentBehavior: allPass })
+  await run(h4, '/loopbegin')
   await sleep(80)
-  check('T11 首次运行完成 19 个迭代', h.getChildren() === 19, 'children=' + h.getChildren())
-  const r2 = await run(h, '/loopbegin')
-  check('T11 不重置时提示无需重复', r2 && r2.kind === 'error' && /已完成 19/.test(r2.text), r2 && r2.text)
-  let status = 0, body = null
-  h.calls.routes[0].handler({ method: 'POST', url: '/mcmp-api/reset' }, { writeHead(c) { status = c }, end(b) { body = JSON.parse(b) } })
-  check('T11 POST /reset 成功', status === 200 && body && body.ok === true)
-  check('T11 会话中追加了重置标记', h.calls.appends.some((a) => a.type === 'tool-workflow/mcmp-reset'))
-  const r3 = await run(h, '/loopbegin')
-  check('T11 重置后再启动为全新运行', r3 && r3.kind === 'success' && /全新运行/.test(r3.text) && !/断点续跑:已跳过/.test(r3.text), r3 && r3.text)
-  await sleep(80)
-  check('T11 重置后再次执行 19 个迭代', h.getChildren() === 38, 'children=' + h.getChildren())
+  const ao4 = h4.requests()[0] && h4.requests()[0].agentOptions
+  check('T16 无父模型选择时兜底 deepseek-v4-flash', ao4 && ao4.provider === 'deepseek-official' && ao4.model === 'deepseek-v4-flash', JSON.stringify(ao4))
 }
 
-console.log('== T12 /loopreset 命令 ==')
-{
-  const h = makeHarness({ events: [PROBLEM_EVENT] })
-  const cmd = h.byName('loopreset')
-  check('T12 /loopreset 已注册', Boolean(cmd))
-  const r0 = cmd.handler()
-  check('T12 空闲时可重置', r0 && r0.kind === 'success' && /从头|全新开始/.test(r0.text), r0 && r0.text)
-}
-
-console.log('== T13 中止部分进度 → 重置 → 全新开始(不续跑) ==')
-{
-  const h = makeHarness({ events: [PROBLEM_EVENT] })
-  await run(h, '/loopbegin')
-  h.calls.routes[0].handler({ method: 'POST', url: '/mcmp-api/abort' }, { writeHead() {}, end() {} })
-  await sleep(80)
-  check('T13 中止生效', lastRunEnd(h).data.stopReason === 'cancelled')
-  h.calls.routes[0].handler({ method: 'POST', url: '/mcmp-api/reset' }, { writeHead() {}, end() {} })
-  const r = await run(h, '/loopbegin')
-  check('T13 重置后再启动为全新运行', r && r.kind === 'success' && /全新运行/.test(r.text) && !/断点续跑:已跳过/.test(r.text), r && r.text)
-}
-
-console.log('== T14 中止在兜底定稿阶段也能生效(控制器登记) ==')
+console.log('== T17 中止在兜底定稿阶段也能生效(控制器登记) ==')
 {
   const h = makeHarness({
     events: [PROBLEM_EVENT],
-    subagentBehavior: (i) => (i === 2 ? { text: 'paper', stopReason: 'completed', delay: 150 } : { text: 'x', stopReason: 'completed' }),
+    subagentBehavior: (i, req) => (i === 2 ? { text: 'paper', stopReason: 'completed', delay: 150 } : allPass(i, req)),
   })
   await run(h, '/loopbegin')
   h.calls.routes[0].handler({ method: 'POST', url: '/mcmp-api/abort' }, { writeHead() {}, end() {} })
   await sleep(80)
   const sigs = h.signals()
-  check('T14 兜底定稿子任务已启动(第 2 个 signal)', sigs.length >= 2, 'signals=' + sigs.length)
-  check('T14 兜底定稿使用独立的新控制器', sigs[1] !== sigs[0])
+  check('T17 兜底定稿子任务已启动(第 2 个 signal)', sigs.length >= 2, 'signals=' + sigs.length)
+  check('T17 兜底定稿使用独立的新控制器', sigs[1] !== sigs[0])
   h.calls.routes[0].handler({ method: 'POST', url: '/mcmp-api/abort' }, { writeHead() {}, end() {} })
-  check('T14 第二次中止能 abort 兜底定稿的 signal', sigs[1] && sigs[1].aborted === true, 'sig2.aborted=' + (sigs[1] && sigs[1].aborted))
+  check('T17 第二次中止能 abort 兜底定稿的 signal', sigs[1] && sigs[1].aborted === true, 'sig2.aborted=' + (sigs[1] && sigs[1].aborted))
   await sleep(250)
-  check('T14 run-end 为 cancelled', lastRunEnd(h).data.stopReason === 'cancelled', JSON.stringify(lastRunEnd(h) && lastRunEnd(h).data))
+  check('T17 run-end 为 cancelled', lastRunEnd(h).data.stopReason === 'cancelled', JSON.stringify(lastRunEnd(h).data))
 }
 
-console.log('== T17 --model 强制子任务模型路由 ==')
+console.log('== T18 上报完全缺失(无文件无状态行)→ 按 SUCCESS 交扫描复核 ==')
 {
-  // 完整形式
-  const h = makeHarness({ events: [PROBLEM_EVENT] })
-  const r = await run(h, '/loopbegin --model glm-vision/glm-4.7-Flash')
-  check('T17 启动成功(--model 提供商/模型)', r && r.kind === 'success', r && r.text)
-  await sleep(80)
-  const ao1 = h.requests()[0] && h.requests()[0].agentOptions
-  check('T17 子任务 agentOptions=glm-vision/glm-4.7-Flash', ao1 && ao1.provider === 'glm-vision' && ao1.model === 'glm-4.7-Flash', JSON.stringify(ao1))
-  // 分拆形式
-  const h2 = makeHarness({ events: [PROBLEM_EVENT] })
-  const r2 = await run(h2, '/loopbegin --provider glm-vision --model glm-4.7-Flash')
-  check('T17 启动成功(--provider + --model)', r2 && r2.kind === 'success')
-  await sleep(80)
-  const ao2 = h2.requests()[0] && h2.requests()[0].agentOptions
-  check('T17 子任务 agentOptions(分拆形式)', ao2 && ao2.provider === 'glm-vision' && ao2.model === 'glm-4.7-Flash', JSON.stringify(ao2))
-  // 缺提供商 → 报错
-  const h3 = makeHarness({ events: [PROBLEM_EVENT] })
-  const r3 = await run(h3, '/loopbegin --model glm-4.7-Flash')
-  check('T17 --model 缺提供商时提示格式', r3 && r3.kind === 'error' && /提供商\/模型/.test(r3.text), r3 && r3.text)
-  // 不传 --model 且无 agentDefaultModel → 兜底 deepseek-official/deepseek-v4-flash
-  const h4 = makeHarness({ events: [PROBLEM_EVENT] })
-  const r4 = await run(h4, '/loopbegin')
-  check('T17 不传 --model 时启动成功', r4 && r4.kind === 'success')
-  await sleep(80)
-  const ao4 = h4.requests()[0] && h4.requests()[0].agentOptions
-  check('T17 无父模型选择时兜底 deepseek-v4-flash', ao4 && ao4.provider === 'deepseek-official' && ao4.model === 'deepseek-v4-flash', JSON.stringify(ao4))
+  const h = makeHarness({
+    events: [PROBLEM_EVENT],
+    reportContent: null,
+    subagentBehavior: (i, req) => {
+      if (isExec(req)) return { text: '工作完成(无状态行)', stopReason: 'completed' }
+      if (isReview(req)) return { text: '决策: NO_ACTION', stopReason: 'completed' }
+      return allPass(i, req)
+    },
+  })
+  await run(h, '/loopbegin')
+  await sleep(120)
+  check('T18 评审决策 0 次(走扫描)', h.requests().filter((r) => isReview(r)).length === 0, 'reviews=' + h.requests().filter((r) => isReview(r)).length)
+  check('T18 扫描 22 次', h.requests().filter((r) => isScan(r)).length === 22, 'scans=' + h.requests().filter((r) => isScan(r)).length)
+  check('T18 run-end completed', lastRunEnd(h).data.stopReason === 'completed')
 }
 
-console.log('== T18 子任务模型强制跟随父对话当前选择(右下角模型选择器) ==')
+console.log('== T19 旧报告残留(agent_id 不匹配)→ 视为缺失,回退回复状态 ==')
 {
-  // 父对话选择 glm-vision/glm-4.7-Flash → 不传 --model 子任务也用 glm
-  const h = makeHarness({ events: [PROBLEM_EVENT], defaultModel: { provider: 'glm-vision', model: 'glm-4.7-Flash' } })
-  const r = await run(h, '/loopbegin')
-  check('T18 启动成功', r && r.kind === 'success')
-  await sleep(80)
-  const ao = h.requests()[0] && h.requests()[0].agentOptions
-  check('T18 子任务 agentOptions=父对话模型(glm)', ao && ao.provider === 'glm-vision' && ao.model === 'glm-4.7-Flash', JSON.stringify(ao))
-  // 换父对话模型(模拟右下角切换到 deepseek-v4-flash)→ 子任务跟随
-  const h2 = makeHarness({ events: [PROBLEM_EVENT], defaultModel: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } })
-  const r2 = await run(h2, '/loopbegin')
-  await sleep(80)
-  const ao2 = h2.requests()[0] && h2.requests()[0].agentOptions
-  check('T18 切换后子任务跟随 deepseek-v4-flash', ao2 && ao2.provider === 'deepseek-official' && ao2.model === 'deepseek-v4-flash', JSON.stringify(ao2))
-  // --model 显式覆盖优先于父对话选择
-  const h3 = makeHarness({ events: [PROBLEM_EVENT], defaultModel: { provider: 'glm-vision', model: 'glm-4.7-Flash' } })
-  const r3 = await run(h3, '/loopbegin --model deepseek-official/deepseek-v4-flash')
-  check('T18 --model 覆盖父对话选择', r3 && r3.kind === 'success')
-  await sleep(80)
-  const ao3 = h3.requests()[0] && h3.requests()[0].agentOptions
-  check('T18 覆盖生效', ao3 && ao3.provider === 'deepseek-official' && ao3.model === 'deepseek-v4-flash', JSON.stringify(ao3))
+  // 报告恒为 0.1 的 NEEDS_REVIEW:仅 0.1 匹配走评审;其余子阶段 agent_id 不符 → 回退回复 SUCCESS → 扫描
+  const h = makeHarness({
+    events: [PROBLEM_EVENT],
+    reportContent: 'agent_id: "0.1"\nstatus: "NEEDS_REVIEW"\nissues: []\n',
+    subagentBehavior: (i, req) => {
+      if (isExec(req)) return { text: '上报状态: SUCCESS\n完成', stopReason: 'completed' }
+      if (isReview(req)) return { text: '决策: NO_ACTION\n评级: P3', stopReason: 'completed' }
+      return allPass(i, req)
+    },
+  })
+  await run(h, '/loopbegin')
+  await sleep(120)
+  check('T19 仅 0.1 走评审(1 次)', h.requests().filter((r) => isReview(r)).length === 1, 'reviews=' + h.requests().filter((r) => isReview(r)).length)
+  check('T19 其余 21 个子阶段走扫描', h.requests().filter((r) => isScan(r)).length === 21, 'scans=' + h.requests().filter((r) => isScan(r)).length)
+  check('T19 run-end completed', lastRunEnd(h).data.stopReason === 'completed')
 }
 
 console.log(failures === 0 ? '\n全部通过 ✓' : '\n' + failures + ' 项失败 ✗')
